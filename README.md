@@ -1,4 +1,224 @@
-# Sabana Herons — Code Release 2026
+# Sabana Herons — Rama `carril-vision`: Carrera Individual (Copa NAO CCM MX 2026)
+
+Esta rama añade al código de RoboCup 2026 (descrito más abajo, en
+[Código base](#código-base-sabana-herons--code-release-2026)) todo lo necesario
+para que un NAO V6 corra la **Carrera Individual de la Copa NAO CCM MX 2026**
+(3 de noviembre de 2026) guiándose solo con la cámara inferior.
+
+**Prueba:** carril recto de 5 m × 70 cm sobre duela de madera, delimitado por dos
+líneas negras de 1.9 cm, con franja de salida negra y meta roja. Si el robot pisa
+fuera del carril, la carrera se anula.
+
+**Estado:** desarrollo y validación en simulación terminados; compilación cruzada
+para el NAO correcta. Faltan las pruebas en el robot real (protocolo en
+[Util/CarrilTools/PROTOCOLO_ROBOT_REAL.md](Util/CarrilTools/PROTOCOLO_ROBOT_REAL.md))
+y ajustar los umbrales de color con una foto real de la cámara inferior.
+
+## Resumen de resultados (simulación)
+
+| Prueba | Resultado |
+| --- | --- |
+| Precisión de la visión, robot quieto (10 poses, ±10 cm / ±25°, 413 frames) | 100 % de detección; error de `d` medio 3.3 mm (máx. 6.0 mm); error de `psi` medio 0.32° (máx. 1.80°) |
+| Carrera completa a `velocidadAvance = 0.8` | 4.78 m en ~24 s, 0 salidas del carril, margen mínimo pie–línea 238 mm, parada de pie justo pasada la meta |
+| Velocidades probadas | 0.5 → 36 s, 0.8 → 24 s, 1.0 → 21.5 s; todas sin salidas |
+| Batería de robustez (salidas desplazadas/giradas × luz baja/alta, duela clara/oscura, líneas gastadas) | Todas las carreras correctas tras el umbral relativo: sin caídas, 0 salidas, margen mínimo ≥ 150 mm, parada entre x = 2577 y 2630 mm |
+| Paro manual y paro por inclinación | Verificados en simulación |
+| Compilación cruzada NAO (`Make/Linux/compile Develop Nao`) | Correcta; regresión en simulación 6/6 tras los cambios de seguridad |
+
+## Cómo se hizo
+
+El trabajo se hizo por pasos, cada uno validado con números medidos contra la pose
+real del simulador (no a ojo) antes de pasar al siguiente.
+
+### Paso 0. Entorno de compilación (Ubuntu 24.04 / WSL2)
+
+El código base no compilaba con clang 18 y Qt ≥ 6.4. Cambios:
+
+- `Make/CMake/CMakeLists.txt`: inclusión forzada de `<cstdint>` en todo el C++
+  (los submódulos CompiledNN y SimRobot usan `uintptr_t`/`uint16_t` sin incluirlo),
+  sin modificar los submódulos.
+- `Make/CMake/QtBackingStoreCompat.cpp` (nuevo): definición vacía de
+  `qt_registerDefaultPlatformBackingStoreOpenGLSupport()`, que Qt 6.4 eliminó y
+  SimRobot sigue llamando; se añade al target SimRobot solo con Qt ≥ 6.4.
+- Local, no versionable: `git config core.symlinks true` y re-checkout de los
+  symlinks; dependencias apt de `Util/SimRobot/README.md` más `build-essential`,
+  `ccache` y `libasound2-dev`.
+
+Compilar: `Make/Linux/compile Develop SimRobot` (binario en
+`Build/Linux/SimRobot/Develop/SimRobot`).
+
+### Paso 1. Cámaras simuladas
+
+Se comprobó que SimRobot renderiza imágenes reales de ambas cámaras (inferior
+320×240, superior 640×480) en las escenas normales (las "Fast" desactivan las
+imágenes). Las imágenes se capturan de forma automática con un `.con` que espera
+frames (`for Lower get representation:FrameInfo`) y guarda con `for Lower si <ruta>.png`.
+
+### Paso 2. Escena del carril
+
+- `Config/Scenes/Includes/Carril/carril.rsi2`: losa de duela de 7 × 3 m, las dos
+  líneas negras, franja de salida y meta roja, y el NAO colocado en la salida.
+  Los colores ambientales son el 80 % del difuso (con un ambiente gris los colores
+  se ven lavados).
+- `Config/Scenes/Carril.ros2` / `Carril.con`: escena principal (sin árbitro
+  automático, coloca el robot con `mv` y pasa a `playing` tras ~8 s).
+- Supuestos: 70 cm = ancho libre entre bordes internos de las líneas; franjas de
+  salida y meta de 10 cm dentro de los 5 m; en coordenadas del robot la salida está
+  en x = −2450 mm y la meta en x = +2450 mm.
+
+Detalle importante: SimRobot espeja x/y (+180°) al robot del primer equipo, tanto
+en `mv` como en `GroundTruthWorldState`. Por eso en la escena la meta está en
+x = −2.45 m y el robot mira hacia −x; en las coordenadas del robot y de las
+herramientas todo queda como se describe arriba.
+
+### Paso 3. Visión del carril
+
+`CarrilPerceptProvider` (hilo Lower) produce `CarrilPercept`:
+
+1. Recorre la imagen de la cámara inferior fila a fila (una de cada `pasoFilas`)
+   buscando tramos oscuros y poco cromáticos.
+2. Proyecta cada tramo al suelo con la `CameraMatrix` y descarta los que no tienen
+   el ancho de una línea (`minAnchoLineaSuelo`..`maxAnchoLineaSuelo`).
+3. Encadena tramos por continuidad horizontal entre filas (`maxSaltoPx`).
+4. Ajusta una recta por mínimos cuadrados totales a cada cadena y elige el par de
+   rectas casi paralelas cuya separación coincide con el ancho nominal.
+5. Calcula `d` (desplazamiento lateral respecto al eje, mm, positivo a la izquierda)
+   y `psi` (desorientación, positiva antihoraria). Si solo ve una línea (robot muy
+   girado), decide el lado por el signo de su posición y usa el ancho nominal.
+
+Todos los umbrales están en `Config/Scenarios/Carril/carrilPerceptProvider.cfg`,
+ninguno fijo en el código.
+
+Para medir la precisión se creó `CarrilEvaluador` (hilo Cognition, solo en
+simulación), que escribe en un CSV el percepto junto a la pose real
+(`GroundTruthWorldState`), y `Util/CarrilTools/evaluar_carril.py`, que genera
+escenas de prueba y analiza el CSV.
+
+### Paso 4. Control de marcha
+
+`CarrilBehavior` (hilo Cognition) sustituye a `SkillBehaviorControl` solo como
+proveedor de `MotionRequest` y `HeadMotionRequest` en el escenario `Carril`.
+Ley de control:
+
+```
+giro   = clamp(-(kD * d + kPsi * psi), ±maxGiro)
+avance = velocidadAvance * (1 - frenoPorGiro * |giro|)
+```
+
+Sin percepto fresco (`maxEdadPercepto` = 300 ms) sigue recto y despacio; si pasan
+`maxEdadSinPercepto` (2 s) sin percepto, se queda de pie. La cabeza se fija para
+que la cámara inferior quede 30° bajo la horizontal (`inclinacionCabeza`; con 0°
+pierde las líneas cerca de la meta).
+
+El evaluador se amplió para calcular el borde exterior de cada pie en coordenadas
+del mundo en cada paso, de modo que `evaluar_carril.py marcha` cuenta salidas del
+carril por pie y paso y el margen mínimo a las líneas.
+
+Resultado de la primera carrera: 4.66 m en 38.2 s, 168 pasos, 0 salidas, margen
+mínimo 198 mm. La visión en marcha dio un 59 % de frames válidos (suficiente con la
+tolerancia de 300 ms) y error medio de `d` de 5.1 mm.
+
+Lección: si el robot echa a andar nada más aparecer en la escena se cae; hace falta
+recolocarlo con `mv` y una espera inicial.
+
+### Paso 5. Meta roja y parada
+
+El percepto añade `metaVisible`, `distanciaMeta` y `numPuntosMeta` (píxeles con
+V − 128 ≥ `minVRojoMeta`). El comportamiento frena a menos de `distanciaFrenado`
+(800 mm) y, a menos de `distanciaFijarParada` (500 mm), fija la parada por
+odometría a la distancia medida más `margenParada` (200 mm); después se queda de pie.
+
+Resultado: 4.78 m recorridos, parada en x ≈ 2630 mm (la franja de meta ocupa
+2400..2500), 0 salidas, margen mínimo 238 mm. La meta se detecta desde ~2.5 m con
+error medio de ~30 mm.
+
+### Paso 6. Robustez
+
+`evaluar_carril.py bateria` lanza una instancia de SimRobot por caso, genera una
+escena temporal (`Config/Scenes/CarrilEval.*`, `Includes/Carril/carrilEval.rsi2`)
+y resume en una tabla con veredicto (sin caída, 0 salidas, parada entre 2500 y
+3000 mm). Casos:
+
+- 9 salidas: centrada, ±10 cm, ±25° y combinaciones;
+- 5 variantes de escena: luz baja (25 %), luz alta (70 %), duela clara, duela
+  oscura y líneas gastadas (gris, en tramos de 40 cm con huecos de 5 cm).
+
+Todo pasó salvo las líneas gastadas: su luminancia (~70) superaba el umbral
+absoluto `maxYLinea` = 60 y el robot no arrancaba. Se cambió a un **umbral
+relativo**: un píxel es línea si su luminancia es menor que
+`min(maxYLinea = 110, fraccionYLinea = 0.6 × mediana de la fila)`. Con ello la
+batería completa pasó 12/12, incluidas las líneas gastadas.
+
+### Paso 7. Seguridad y paso al robot real
+
+`CarrilBehavior` usa los estados del `GameState` (los mismos botones que en un
+partido):
+
+| Estado | LED del pecho | Robot | Cómo se llega |
+| --- | --- | --- | --- |
+| Sin rigidez | azul parpadeando | sin par | al arrancar, o los 3 botones de la cabeza |
+| De pie (`initial`) | apagado | quieto | 1 toque al pecho |
+| Carrera (`playing`) | verde | espera 2 s y corre | 1 toque al pecho |
+| Paro manual (`penalizedManual`) | rojo | quieto de pie | 1 toque al pecho durante la carrera |
+
+- Cada entrada en `playing` es una carrera nueva (se reinician meta y paros).
+- **Paro por inclinación:** si el torso supera `maxInclinacion` (25°) o el robot
+  cae, la carrera se aborta. Mientras cae actúa la protección normal (no se pide
+  `playDead`, que desactivaría el FallEngine); ya en el suelo queda sin rigidez
+  hasta una carrera nueva (`levantarseTrasCaida = false`). El estado "en el suelo"
+  se recuerda porque en `playDead` el `FallDownState` vuelve a `upright` aunque el
+  robot siga tumbado.
+- En simulación: Shift+Ctrl+P = playing, Shift+Ctrl+M = paro, Shift+Ctrl+U = quitar paro.
+- `CarrilEvaluador` solo escribe el CSV en simulación.
+
+## Uso
+
+```bash
+# Simulación
+Make/Linux/compile Develop SimRobot
+Build/Linux/SimRobot/Develop/SimRobot Config/Scenes/Carril.ros2
+
+# Evaluación
+python3 Util/CarrilTools/evaluar_carril.py generar      # precisión con robot quieto
+python3 Util/CarrilTools/evaluar_carril.py analizar
+python3 Util/CarrilTools/evaluar_carril.py marcha       # analiza una carrera completa
+python3 Util/CarrilTools/evaluar_carril.py bateria todas todas
+
+# Robot real
+Make/Linux/compile Develop Nao
+Make/Common/deploy Develop <ip-del-robot> -s Carril -b
+```
+
+Para cambiar solo parámetros basta con editar el `.cfg` y desplegar con `-nc`.
+
+## Archivos de la rama
+
+| Ruta | Contenido |
+| --- | --- |
+| `Src/Representations/Perception/Carril/CarrilPercept.h` | Percepto del carril (`d`, `psi`, líneas, meta) |
+| `Src/Modules/Perception/Carril/CarrilPerceptProvider.*` | Detector de líneas y meta (cámara inferior) |
+| `Src/Modules/BehaviorControl/CarrilBehavior/*` | Control de marcha, parada en meta y paros |
+| `Src/Modules/Infrastructure/CarrilEvaluador/*`, `Src/Representations/Infrastructure/CarrilEvaluacion.h` | Registro CSV percepto vs. pose real (solo simulación) |
+| `Config/Scenarios/Carril/` | `threads.cfg` y parámetros (`carrilBehavior.cfg`, `carrilPerceptProvider.cfg`, `carrilEvaluador.cfg`) |
+| `Config/Scenes/Carril.*`, `Config/Scenes/Includes/Carril/carril.rsi2` | Escena del carril |
+| `Config/Scenes/CarrilEval.*`, `Includes/Carril/carrilEval.rsi2` | Escenas generadas por `evaluar_carril.py` |
+| `Util/CarrilTools/evaluar_carril.py` | Generación de escenas, análisis y batería de robustez |
+| `Util/CarrilTools/PROTOCOLO_ROBOT_REAL.md` | Protocolo de pruebas en el NAO real |
+| `Make/CMake/CMakeLists.txt`, `Make/CMake/QtBackingStoreCompat.cpp` | Arreglos de compilación (clang 18 / Qt ≥ 6.4) |
+
+## Pendiente
+
+- Pruebas en el robot real siguiendo el protocolo: botones y paros con arnés,
+  velocidad baja (0.3) y subida progresiva hasta 0.8.
+- Foto real de la cámara inferior sobre el carril (o cinta negra sobre madera) para
+  ajustar `fraccionYLinea` y `minVRojoMeta`.
+- Confirmar la regla de meta (si basta cruzarla o hay que parar dentro); hoy se
+  para unos 10–15 cm después de la franja roja.
+
+---
+
+# Código base: Sabana Herons — Code Release 2026
+
 
 This is the code that team **Sabana Herons** (Universidad de La Sabana,
 Colombia) used in the **RoboCup 2026 Humanoid Soccer League (HSL)** with NAO
