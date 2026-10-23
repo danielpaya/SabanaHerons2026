@@ -1,0 +1,73 @@
+<!--
+  Carril de la Carrera Individual (Copa NAO CCM MX 2026).
+
+  Dimensiones (editar aquí y mantener coherentes las tres marcas):
+    - Carril: 5 m de largo (eje x, de -2.5 m a +2.5 m) x 70 cm de ancho libre
+      entre los bordes internos de las líneas laterales.
+    - Sentido: la carrera va hacia -x de la ESCENA. robot1 es del primer equipo y
+      SimRobot le espeja x/y (+180°) tanto en `mv` como en GroundTruthWorldState
+      (SimulatedRobot.cpp), así que en las coordenadas del robot y de todas las
+      herramientas la salida queda en x = -2.45 m y la meta en x = +2.45 m.
+    - Líneas laterales: negras, 1.9 cm de ancho; centros en y = +/-0.3595 m
+      (= 0.35 + 0.019/2), solo apariencia (2 mm de grosor, sin colisión).
+    - Franja de salida: negra, 10 cm a lo largo de x, centrada en x = +2.45 m (escena),
+      cubre el ancho del carril más las líneas (0.738 m).
+    - Meta: roja, mismas medidas que la franja de salida, centrada en x = -2.45 m (escena).
+    - Duela: losa de 7 m x 3 m x 0.2 m con la cara superior en z = 0.
+
+  Colores: SOLO en las Surface de abajo (nunca en el código de visión; ahí son
+  parámetros de configuración). Para variar tono de duela, luz o desgaste de
+  líneas, editar estas Surface y recargar la escena.
+-->
+<Simulation>
+
+  <!-- ambientColor = color difuso al 80%, como las superficies nao-* de NaoV6H25.rsi2;
+       un ambiente gris lavaría los colores oscuros. -->
+  <Surface name="carrilDuela" diffuseColor="rgb(185, 140, 90)" ambientColor="rgb(148, 112, 72)" specularColor="rgb(5%, 5%, 5%)" shininess="2"/>
+  <Surface name="carrilLinea" diffuseColor="rgb(20, 20, 20)" ambientColor="rgb(16, 16, 16)" specularColor="rgb(5%, 5%, 5%)" shininess="2"/>
+  <Surface name="carrilMeta" diffuseColor="rgb(200, 30, 30)" ambientColor="rgb(160, 24, 24)" specularColor="rgb(5%, 5%, 5%)" shininess="2"/>
+
+  <Compound name="carrilFloor">
+    <BoxAppearance depth="7m" width="3m" height="0.2m">
+      <Surface ref="carrilDuela"/>
+      <Translation z="-0.1m"/>
+    </BoxAppearance>
+    <BoxGeometry depth="7m" width="3m" height="0.2m" color="rgb(185, 140, 90)">
+      <Translation z="-0.1m"/>
+    </BoxGeometry>
+  </Compound>
+
+  <Compound name="carril">
+    <!-- Línea lateral izquierda (y positivo) -->
+    <BoxAppearance depth="5m" width="0.019m" height="0.002m">
+      <Surface ref="carrilLinea"/>
+      <Translation y="0.3595m" z="0.001m"/>
+    </BoxAppearance>
+    <!-- Línea lateral derecha (y negativo) -->
+    <BoxAppearance depth="5m" width="0.019m" height="0.002m">
+      <Surface ref="carrilLinea"/>
+      <Translation y="-0.3595m" z="0.001m"/>
+    </BoxAppearance>
+    <!-- Franja de salida (negra) -->
+    <BoxAppearance depth="0.1m" width="0.738m" height="0.002m">
+      <Surface ref="carrilLinea"/>
+      <Translation x="2.45m" z="0.001m"/>
+    </BoxAppearance>
+    <!-- Meta (roja) -->
+    <BoxAppearance depth="0.1m" width="0.738m" height="0.002m">
+      <Surface ref="carrilMeta"/>
+      <Translation x="-2.45m" z="0.001m"/>
+    </BoxAppearance>
+  </Compound>
+
+  <Compound name="carrilRobots">
+    <Body ref="Nao" name="robot1">
+      <Set name="NaoColor" value="black"/>
+      <!-- Sobre el eje del carril, justo después de la franja de salida, mirando a la meta
+           (-x de la escena; -2200 mirando a +x en las coordenadas espejadas del robot). -->
+      <Translation x="2.2m" z="320mm"/>
+      <Rotation z="180degree"/>
+    </Body>
+  </Compound>
+
+</Simulation>
