@@ -1,4 +1,4 @@
-<!-- TEMPORAL generado por Util/CarrilTools/evaluar_carril.py (variante lineas_gastadas). No editar. -->
+<!-- TEMPORAL generado por Util/CarrilTools/evaluar_carril.py (variante base). No editar. -->
 <!--
   Carril de la Carrera Individual (Copa NAO CCM MX 2026).
 
@@ -26,7 +26,7 @@
        un ambiente gris lavaría los colores oscuros. -->
   <Surface name="carrilDuela" diffuseColor="rgb(185, 140, 90)" ambientColor="rgb(148, 112, 72)" specularColor="rgb(5%, 5%, 5%)" shininess="2"/>
   <Surface name="carrilLinea" diffuseColor="rgb(20, 20, 20)" ambientColor="rgb(16, 16, 16)" specularColor="rgb(5%, 5%, 5%)" shininess="2"/>
-  <Surface name="carrilLateral" diffuseColor="rgb(70, 70, 70)" ambientColor="rgb(56, 56, 56)" specularColor="rgb(5%, 5%, 5%)" shininess="2"/>
+  <Surface name="carrilLateral" diffuseColor="rgb(20, 20, 20)" ambientColor="rgb(16, 16, 16)" specularColor="rgb(5%, 5%, 5%)" shininess="2"/>
   <Surface name="carrilMeta" diffuseColor="rgb(200, 30, 30)" ambientColor="rgb(160, 24, 24)" specularColor="rgb(5%, 5%, 5%)" shininess="2"/>
 
   <Compound name="carrilFloor">
@@ -41,102 +41,14 @@
 
   <Compound name="carril">
     <!-- Línea lateral izquierda (y positivo) -->
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
+    <BoxAppearance depth="5m" width="0.019m" height="0.002m">
       <Surface ref="carrilLateral"/>
-      <Translation x="-2.300m" y="0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="-1.850m" y="0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="-1.400m" y="0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="-0.950m" y="0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="-0.500m" y="0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="-0.050m" y="0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="0.400m" y="0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="0.850m" y="0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="1.300m" y="0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="1.750m" y="0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="2.200m" y="0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.050m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="2.475m" y="0.3595m" z="0.001m"/>
+      <Translation y="0.3595m" z="0.001m"/>
     </BoxAppearance>
     <!-- Línea lateral derecha (y negativo) -->
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
+    <BoxAppearance depth="5m" width="0.019m" height="0.002m">
       <Surface ref="carrilLateral"/>
-      <Translation x="-2.300m" y="-0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="-1.850m" y="-0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="-1.400m" y="-0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="-0.950m" y="-0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="-0.500m" y="-0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="-0.050m" y="-0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="0.400m" y="-0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="0.850m" y="-0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="1.300m" y="-0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="1.750m" y="-0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.400m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="2.200m" y="-0.3595m" z="0.001m"/>
-    </BoxAppearance>
-    <BoxAppearance depth="0.050m" width="0.019m" height="0.002m">
-      <Surface ref="carrilLateral"/>
-      <Translation x="2.475m" y="-0.3595m" z="0.001m"/>
+      <Translation y="-0.3595m" z="0.001m"/>
     </BoxAppearance>
     <!-- Franja de salida (negra) -->
     <BoxAppearance depth="0.1m" width="0.738m" height="0.002m">

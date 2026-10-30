@@ -9,10 +9,11 @@ para que un NAO V6 corra la **Carrera Individual de la Copa NAO CCM MX 2026**
 líneas negras de 1.9 cm, con franja de salida negra y meta roja. Si el robot pisa
 fuera del carril, la carrera se anula.
 
-**Estado:** desarrollo y validación en simulación terminados; compilación cruzada
-para el NAO correcta. Faltan las pruebas en el robot real (protocolo en
-[Util/CarrilTools/PROTOCOLO_ROBOT_REAL.md](Util/CarrilTools/PROTOCOLO_ROBOT_REAL.md))
-y ajustar los umbrales de color con una foto real de la cámara inferior.
+**Estado:** visión y marcha validadas en simulación y en el robot real a
+`velocidadAvance = 0.3` (con el arranque anterior, por el pecho). El arranque por
+botón de la cabeza o silbato y la recuperación tras caída (paso 8) están validados
+solo en simulación; faltan en el robot real (protocolo en
+[Util/CarrilTools/PROTOCOLO_ROBOT_REAL.md](Util/CarrilTools/PROTOCOLO_ROBOT_REAL.md)).
 
 ## Resumen de resultados (simulación)
 
@@ -23,6 +24,7 @@ y ajustar los umbrales de color con una foto real de la cámara inferior.
 | Velocidades probadas | 0.5 → 36 s, 0.8 → 24 s, 1.0 → 21.5 s; todas sin salidas |
 | Batería de robustez (salidas desplazadas/giradas × luz baja/alta, duela clara/oscura, líneas gastadas) | Todas las carreras correctas tras el umbral relativo: sin caídas, 0 salidas, margen mínimo ≥ 150 mm, parada entre x = 2577 y 2630 mm |
 | Paro manual y paro por inclinación | Verificados en simulación |
+| Arranque por botón de la cabeza / silbato, recuperación tras caída (paso 8) | Lógica verificada en simulación con disparos de prueba; regresión 12/12 a `velocidadAvance = 0.3` (~53 s, 0 salidas). Sin probar en el robot real |
 | Compilación cruzada NAO (`Make/Linux/compile Develop Nao`) | Correcta; regresión en simulación 6/6 tras los cambios de seguridad |
 
 ## Cómo se hizo
@@ -61,7 +63,8 @@ frames (`for Lower get representation:FrameInfo`) y guarda con `for Lower si <ru
   Los colores ambientales son el 80 % del difuso (con un ambiente gris los colores
   se ven lavados).
 - `Config/Scenes/Carril.ros2` / `Carril.con`: escena principal (sin árbitro
-  automático, coloca el robot con `mv` y pasa a `playing` tras ~8 s).
+  automático, coloca el robot con `mv`, tras ~8 s lo arma y arranca la carrera con
+  el disparo de simulación, ver el paso 8).
 - Supuestos: 70 cm = ancho libre entre bordes internos de las líneas; franjas de
   salida y meta de 10 cm dentro de los 5 m; en coordenadas del robot la salida está
   en x = −2450 mm y la meta en x = +2450 mm.
@@ -151,25 +154,76 @@ batería completa pasó 12/12, incluidas las líneas gastadas.
 
 ### Paso 7. Seguridad y paso al robot real
 
-`CarrilBehavior` usa los estados del `GameState` (los mismos botones que en un
-partido):
+Primera versión, probada en el robot real a `velocidadAvance = 0.3`: un toque al
+pecho ponía el robot de pie (`initial`), otro lo pasaba a `playing` y corría tras
+2 s; el pecho durante la carrera era el paro manual (`penalizedManual`). Con
+`maxInclinacion` (25°) o una caída la carrera se abortaba; mientras cae actúa la
+protección normal (no se pide `playDead`, que desactivaría el FallEngine) y ya en el
+suelo queda sin rigidez. El estado "en el suelo" se recuerda porque en `playDead` el
+`FallDownState` vuelve a `upright` aunque el robot siga tumbado. `CarrilEvaluador`
+solo escribe el CSV en simulación.
+
+### Paso 8. Arranque por silbato o botón de la cabeza, y recuperación tras caída
+
+El reglamento (sección 3.2) pone en marcha el cronómetro con el silbato del juez y pide
+activar el robot con un sensor del NAO hasta 10 s después; los 2 s de espera tras el
+segundo toque al pecho contaban contra el tiempo. Ahora **el pecho nunca arranca la
+carrera** y `CarrilBehavior` ya no depende de que el `GameState` pase a `playing`:
 
 | Estado | LED del pecho | Robot | Cómo se llega |
 | --- | --- | --- | --- |
-| Sin rigidez | azul parpadeando | sin par | al arrancar, o los 3 botones de la cabeza |
-| De pie (`initial`) | apagado | quieto | 1 toque al pecho |
-| Carrera (`playing`) | verde | espera 2 s y corre | 1 toque al pecho |
-| Paro manual (`penalizedManual`) | rojo | quieto de pie | 1 toque al pecho durante la carrera |
+| Sin rigidez (`unstiff`) | azul parpadeando | sin par | al arrancar bhuman, o los 3 botones de la cabeza |
+| **Armado** (`initial` o `playing`, activo) | apagado / verde | de pie, quieto | 1 toque al pecho desde sin rigidez |
+| **Corriendo** | igual que armado | anda tras `esperaTrasBoton` (0.8 s) o `esperaTrasSilbato` (0 s) | botón frontal de la cabeza o, con `arranquePorSilbato`, un silbato nuevo |
+| **Paro manual** (`penalizedManual`) | rojo | de pie, quieto | 1 toque al pecho |
 
-- Cada entrada en `playing` es una carrera nueva (se reinician meta y paros).
-- **Paro por inclinación:** si el torso supera `maxInclinacion` (25°) o el robot
-  cae, la carrera se aborta. Mientras cae actúa la protección normal (no se pide
-  `playDead`, que desactivaría el FallEngine); ya en el suelo queda sin rigidez
-  hasta una carrera nueva (`levantarseTrasCaida = false`). El estado "en el suelo"
-  se recuerda porque en `playDead` el `FallDownState` vuelve a `upright` aunque el
-  robot siga tumbado.
-- En simulación: Shift+Ctrl+P = playing, Shift+Ctrl+M = paro, Shift+Ctrl+U = quitar paro.
-- `CarrilEvaluador` solo escribe el CSV en simulación.
+- Silbato nuevo: detectado más de `margenSilbato` (500 ms) después de armar y con
+  confianza ≥ `minConfianzaSilbato` (0.5). Con GameController activo, solo en `playing`.
+- El botón frontal (`hitStreak == 1`) se ignora con el central o el trasero pulsados
+  (gesto de sin rigidez).
+- **Tras cualquier paro** (pecho, inclinación, meta, sin líneas tras una caída) la
+  carrera queda *detenida*: no se reanuda sola ni con silbato; solo el botón de la
+  cabeza arranca una carrera nueva. Pasar por sin rigidez y volver a armar empieza de
+  cero (el silbato vuelve a valer).
+- **Caída:** `levantarseTrasCaida` (levantarse en vez de quedarse sin rigidez) y
+  `reanudarTrasCaida` (seguir la misma carrera) son independientes y están en
+  `false` por defecto. Con ambos activos, tras `tiempoEstableTrasCaida` (1 s) de pie
+  con el torso a menos de `inclinacionEstable` (10°) sigue la carrera sin reiniciarla
+  (conserva la parada en meta ya fijada). No anda hasta volver a ver las líneas; si no
+  las ve en `maxEdadSinPercepto` (2 s), se queda de pie. Tras `maxCaidas` (2) caídas
+  reanudadas, la siguiente lo deja sin rigidez en el suelo.
+- **Disparos solo de simulación** (ignorados en el robot): `dr module:CarrilBehavior:arrancar`
+  equivale al botón de la cabeza (`Carril.con` y `evaluar_carril.py` lo usan tras
+  armar) y `dr module:CarrilBehavior:silbato` a un silbato detectado en ese momento
+  (confianza 1.0). Hace falta el segundo porque en SimRobot el `Whistle` no llega al
+  comportamiento: se probó que ni `gc set` → `gc playing` (el GameController simulado
+  sí genera un silbato) ni `module:WhistleRecognizer:detectNow` lo actualizan en
+  Cognition. A mano: Shift+Ctrl+M = paro, Shift+Ctrl+U = quitar el paro (vuelve a
+  armar, no arranca).
+- Si un paro por inclinación acaba en caída (en una caída real la inclinación puede
+  superar 25° antes de que el `FallDownState` la detecte), cuenta como caída.
+
+Resultados en simulación (`velocidadAvance = 0.3`, las pruebas de caída con
+`levantarseTrasCaida` y `reanudarTrasCaida` activados solo para la prueba):
+
+| Prueba | Resultado |
+| --- | --- |
+| Batería (7 salidas del modo `todas` en la base + 5 variantes centradas) | 12/12 correctas, 0 salidas del carril, sin caídas, 52.7–53.8 s de marcha, parada en x = 2589–2635 mm |
+| Armado sin disparo | de pie, no arranca (`gc playing` no arranca) |
+| Paro manual, quitar el paro y disparo | se para; al volver a armar no arranca; con el disparo, carrera nueva hasta la meta |
+| Silbato con `arranquePorSilbato = true` / `false` | arranca y llega a la meta / no arranca |
+| Silbato con el robot penalizado y después armado | ese silbato no cuenta; uno nuevo sí arranca |
+| Silbato tras un paro | no arranca; el disparo (botón) sí |
+| Caída con los valores por defecto | sin rigidez en el suelo |
+| Caída con `levantarseTrasCaida` | se levanta y se queda de pie |
+| Caída con ambos | se levanta, reanuda la misma carrera y se para en la meta (x = 2638) |
+| Levantarse sin líneas a la vista | se queda de pie |
+| Tres caídas | reanuda la 1.ª y la 2.ª; tras la 3.ª, sin rigidez en el suelo |
+
+Las caídas se provocan con `mv` (robot girado 70°), no por la propia marcha. No se
+pueden simular el botón real de la cabeza, el reconocedor de silbato con audio, ni
+una caída real; el paso de "paro por inclinación" a "caída" tampoco se dio en
+simulación (con 30° el robot cae directamente).
 
 ## Uso
 
@@ -208,8 +262,9 @@ Para cambiar solo parámetros basta con editar el `.cfg` y desplegar con `-nc`.
 
 ## Pendiente
 
-- Pruebas en el robot real siguiendo el protocolo: botones y paros con arnés,
-  velocidad baja (0.3) y subida progresiva hasta 0.8.
+- Pruebas en el robot real del arranque nuevo y de la caída siguiendo el protocolo
+  (etapas 1, 2, 4 y 5): botón de la cabeza, silbato real (falsos positivos con ruido de
+  sala) y caída/recuperación sobre colchoneta; después subir la velocidad desde 0.3.
 - Foto real de la cámara inferior sobre el carril (o cinta negra sobre madera) para
   ajustar `fraccionYLinea` y `minVRojoMeta`.
 - Confirmar la regla de meta (si basta cruzarla o hay que parar dentro); hoy se

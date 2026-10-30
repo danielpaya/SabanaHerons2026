@@ -1,0 +1,3 @@
+# Conecta con el robot del carril (juan, por Ethernet) y abre las imágenes de las cámaras.
+sc Remote 192.168.49.5
+call Includes/JPEGImageViews

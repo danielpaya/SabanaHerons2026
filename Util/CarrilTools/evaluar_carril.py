@@ -270,7 +270,7 @@ VARIANTES = {
 TRAMO_GASTADO = 0.40
 HUECO_GASTADO = 0.05
 
-GETS_ASENTAR = 240  # ~8 s en pie tras colocar al robot, antes de playing
+GETS_ASENTAR = 240  # ~8 s en pie tras colocar al robot, antes de armar y arrancar
 GETS_CARRERA = 2400  # espera inicial + carrera + parada (~80 s simulados)
 CARPETA = Path("/tmp/carril_eval")
 
@@ -329,8 +329,9 @@ def generar_carrera(y, giro, variante):
         "",
         f"mv -2200 {y} 320 0 0 {giro}",
     ]
-    # Asentarse en pie (~8 s) y empezar la carrera (playing), como en Carril.con.
-    lineas += ["for Lower get representation:FrameInfo"] * GETS_ASENTAR + ["gc playing"]
+    # Asentarse en pie (~8 s), armar (playing) y arrancar con el disparo de simulación
+    # (equivale al botón de la cabeza), como en Carril.con.
+    lineas += ["for Lower get representation:FrameInfo"] * GETS_ASENTAR + ["gc playing", "dr module:CarrilBehavior:arrancar"]
     lineas += ["for Lower get representation:FrameInfo"] * GETS_CARRERA
     lineas += [f"for Lower si {CARPETA}/fin_lower.png", f"for Upper si {CARPETA}/fin.png"]
     (escenas / "CarrilEval.con").write_text("\n".join(lineas) + "\n")

@@ -1,0 +1,954 @@
+===============================================================================
+ DESPLIEGUE SEGURO DE POLÍTICAS DE MOVIMIENTO PROPIAS EN EL NAO (B-Human 2025)
+ Sabana Herons — repositorio SabanaHerons2026, rama carril-vision
+ Documento de referencia técnica. Fecha de la revisión: 2026-10-29.
+===============================================================================
+
+Este documento reúne todo lo que hace falta saber para revisar si una política
+de movimiento entrenada desde cero (RL) es compatible con el NAO y con el
+código que corre en él, y cómo ponerla en el robot sin dañarlo.
+
+Todo lo que aparece aquí se sacó leyendo el código de este repositorio y
+revisando el robot "juan" (192.168.49.5) por SSH. Cada dato lleva el archivo de
+donde sale para que se pueda verificar. Cuando algo es una recomendación o una
+estimación (no un hecho del código) se dice explícitamente.
+
+Unidades usadas en B-Human (salvo que se indique otra cosa):
+  - Ángulos: radianes en el código; los .cfg aceptan "deg".
+  - Distancias: milímetros.
+  - Tiempo: milisegundos (FrameInfo.time); algunos parámetros en segundos.
+  - Velocidad angular (gyro): rad/s.  Aceleración: m/s².
+  - Stiffness: entero 0..100 (%) en B-Human; LoLA recibe 0.0..1.0.
+
+-------------------------------------------------------------------------------
+ÍNDICE
+-------------------------------------------------------------------------------
+  0.  Resumen ejecutivo y preguntas que la política debe poder contestar
+  1.  Hardware y software reales del robot (juan)
+  2.  Hilos, frecuencias y presupuesto de tiempo
+  3.  La interfaz con el hardware: LoLA
+  4.  Las articulaciones: orden, límites, stiffness, velocidades
+  5.  Convenciones de signos, ejes y espejado
+  6.  Sensores: qué llega, en qué unidades, con qué retardo
+  7.  MotionEngine: cómo se decide qué mueve las articulaciones
+  8.  El walking engine de B-Human, paso a paso
+  9.  Poses de referencia (stand, sit)
+ 10.  Capas de seguridad que ya existen (y cuáles NO protegen a una política)
+ 11.  Simulador (SimRobot) vs robot real: diferencias que rompen políticas
+ 12.  Ejecutar una red ONNX en el robot
+ 13.  Tres formas de conectar una política propia (A, B, C)
+ 14.  Lista de verificación de la política entrenada
+ 15.  Protocolo de pruebas en el robot real
+ 16.  Estado observado de juan el 2026-10-29
+ 17.  Índice de archivos
+
+===============================================================================
+0. RESUMEN EJECUTIVO
+===============================================================================
+
+0.1 Lo más importante en diez puntos
+
+  1. El ciclo de control de motores es de 12 ms (83.3 Hz). Es el ritmo de LoLA
+     y del hilo Motion de B-Human. Una política de articulaciones debe producir
+     una acción cada 12 ms o mantener la última de forma explícita.
+     (Src/Libs/MathBase/Constants.h: motionCycleTime = 0.012f)
+
+  2. El NAO NO tiene control de par ni ganancias PD configurables. Cada
+     articulación recibe (ángulo objetivo, stiffness). El control de posición
+     lo hace el firmware de la placa del motor. "Stiffness" es el porcentaje
+     del par/corriente máxima que el motor puede usar para llegar al objetivo,
+     NO una kp. Una política entrenada con PD (kp, kd) en un simulador debe
+     traducirse a esto y validarse.
+
+  3. LoLA maneja 25 articulaciones, no 26: rHipYawPitch NO existe como motor.
+     Las dos caderas yaw-pitch están acopladas mecánicamente a un solo motor
+     (lHipYawPitch). Lo que se mande a rHipYawPitch se ignora.
+     (Src/Modules/Infrastructure/NaoProvider/NaoProvider.cpp)
+
+  4. Antes de enviarse, todos los ángulos se recortan a los límites de
+     Config/Robots/Default/jointLimits.cfg (MotionEngine.cpp). Pero el
+     recorte no protege de cambios bruscos, autocolisiones ni de calentar
+     motores.
+
+  5. La comprobación de NaN/Inf en los ángulos solo existe en compilación
+     Debug (#ifndef NDEBUG en MotionEngine.cpp). En Develop/Release, que es lo
+     que corre en el robot, un NaN que salga de la red llega a LoLA tal cual,
+     así que la integración tiene que filtrarlo.
+
+  6. El SimRobot de este repo ignora la stiffness por completo, simula
+     rHipYawPitch como articulación independiente y no simula corrientes ni
+     temperaturas (Src/Libs/SimulatedNao/SimulatedRobot3D.cpp). Una política
+     validada solo en SimRobot no está validada para el robot real.
+
+  7. El robot se sienta solo (playDead) si el giroscopio tiene offset, si
+     Cognition deja de llegar más de 3 s o mientras no termina la calibración
+     del gyro. Eso pasa por encima de cualquier política conectada al
+     MotionEngine.
+
+  8. La lectura de ángulos llega con unos 3 ciclos (~36 ms) de retraso
+     respecto al comando. B-Human compensa este retraso con una LSTM
+     (JointAnglePredictor). La política debe haberse entrenado con ese retraso
+     o con observaciones equivalentes.
+
+  9. ONNX en el robot: ONNX Runtime 1.10.0 en un Intel Atom E3845
+     (4 núcleos, 1.91 GHz, sin GPU). Opset máximo ~15. La inferencia debe
+     caber, con holgura, dentro de los 12 ms del hilo Motion, junto con todo lo
+     demás.
+
+ 10. Hoy (2026-10-29) la batería de juan está en 3–4 % (cargando). No se
+     deben hacer pruebas de movimiento con batería baja: el voltaje cae y los
+     motores rinden distinto.
+
+0.2 Preguntas que hay que contestar sobre la política ANTES de tocar el robot
+
+  a) ¿Qué produce la red?
+       - Velocidades/órdenes de caminata (vx, vy, w)         → Integración A
+       - Objetivos de paso (posición del siguiente pie)      → Integración B
+       - Ángulos (o deltas de ángulo) de las articulaciones  → Integración C
+  b) ¿A qué frecuencia se entrenó? ¿Con qué retardo de acción y de observación?
+  c) ¿Qué modelo de actuador se usó en el entrenamiento? (PD ideal, kp/kd,
+     par máximo, velocidad máxima, retardo, juego mecánico)
+  d) ¿Cuál es el orden exacto de las articulaciones en la acción y en la
+     observación? ¿En radianes? ¿Con qué normalización?
+  e) ¿Se trató HipYawPitch como una sola articulación compartida?
+  f) ¿Qué observaciones usa? (IMU, ángulos, velocidades articulares, FSR,
+     comando) ¿Con qué marco de referencia y signo?
+  g) ¿Cuál es la pose inicial del episodio? ¿Cómo se llega a ella desde la
+     pose sentada del NAO?
+  h) ¿Hubo aleatorización de dominio (masas, fricción, retardos, ruido)?
+  i) ¿Hay penalización de par, velocidad, aceleración o "action rate"?
+  j) ¿Qué pasa si la política recibe una observación fuera de distribución
+     (robot levantado, caído, empujado)?
+
+===============================================================================
+1. HARDWARE Y SOFTWARE REALES DEL ROBOT (juan, medido el 2026-10-29)
+===============================================================================
+
+  CPU ............... Intel Atom E3845 @ 1.91 GHz, 4 núcleos
+  RAM ............... 3.8 GB (≈3.3 GB libres con bhuman corriendo)
+  SO ................ Ubuntu 22.04.5 LTS
+  Kernel ............ 5.15.55-rt48-b-human (PREEMPT_RT, tiempo real)
+  Procesos .......... /opt/aldebaran/bin/hal, /opt/aldebaran/bin/lola,
+                      /home/nao/Config/bhuman -w (se arranca con /home/nao/bin/bhuman -b)
+  ONNX .............. /home/nao/Config/libonnxruntime.so.1.10.0
+  Cámaras ........... 2x OV5640 (USB)
+  Red ............... eth0 100 Mbps (cableado)
+  Cabeza/cuerpo ..... head P0000074A05S94S00041 / body P0000073A07S95900020
+                      (Config/Robots/robots.cfg)
+
+  Configuración específica de juan en el repo:
+    Config/Robots/juan/Body/imuCalibration.cfg  (rotación de IMU de ~3.0°,
+        eje casi Y: angle = 0.0525 rad, axis = (-0.044, 0.999, 0.002))
+    Config/Robots/juan/juan/cameraCalibration.cfg
+  juan NO tiene jointCalibration.cfg propio: usa los offsets de
+  Config/Robots/Default/jointCalibration.cfg, que son todos 0.
+
+  Orden de búsqueda de .cfg (Src/Libs/Framework/Settings.cpp), primero gana:
+    1. Config/Robots/<head>/Head/
+    2. Config/Robots/<body>/Body/
+    3. Config/Robots/<head>/<body>/
+    4. Config/Locations/<location>/
+    5. Config/Scenarios/<scenario>/
+    6. Config/Robots/Default/
+    7. Config/Locations/Default/
+    8. Config/Scenarios/Default/
+  Hoy en el robot: location = 4v4_Full, scenario = Carril
+  (/home/nao/Config/settings.cfg).
+
+  Despliegue: el deploy copia Config/ con rsync --del, así que lo que no esté
+  en el repo desaparece del robot (ver BITACORA_ROBOT_REAL.md).
+
+===============================================================================
+2. HILOS, FRECUENCIAS Y PRESUPUESTO DE TIEMPO
+===============================================================================
+
+Definidos en Config/Scenarios/<escenario>/threads.cfg:
+
+  Hilo       Prioridad  Unidad         Ritmo                    Qué hace
+  ---------  ---------  -------------  -----------------------  -----------------------------
+  Motion     20 (RT)    Motion         83.3 Hz (paquete LoLA)   Sensores, MotionEngine, motores
+  Cognition  1          Cognition      ~30 Hz (sigue a cámaras) Modelo del mundo, comportamiento
+  Upper      0          Perception     ~30 Hz                   Cámara superior
+  Lower      0          Perception     ~30 Hz                   Cámara inferior
+  Audio      0          Audio          por bloques de audio     Silbato
+  Referee    0          Referee        —                        Gestos del árbitro
+
+Ciclo del hilo Motion (Src/Threads/Motion.cpp):
+  1. NaoProvider::waitForFrameData(): bloquea hasta recibir el paquete de
+     LoLA (por el socket UNIX /tmp/robocup). Eso marca el ritmo de 12 ms.
+  2. Se ejecutan todos los módulos del hilo Motion (sensores → MotionEngine).
+  3. NaoProvider::finishFrame(): envía a LoLA el JointRequest (ángulos +
+     stiffness) y los LEDs.
+
+Consecuencia: cualquier cálculo en el hilo Motion (incluida una red) suma
+tiempo al ciclo. Si el ciclo pasa de 12 ms se pierden paquetes de LoLA y el
+control se vuelve irregular. No hay un margen documentado en el código; como
+regla práctica (recomendación) la red no debería pasar de 2–3 ms en el peor
+caso medido en el Atom.
+
+Comunicación Cognition → Motion: MotionRequest, HeadMotionRequest y
+ArmMotionRequest se producen en Cognition (~30 Hz) y Motion usa el último que
+recibió. Una política de alto nivel en Cognition actúa a ~30 Hz, no a 83 Hz.
+
+===============================================================================
+3. LA INTERFAZ CON EL HARDWARE: LoLA
+===============================================================================
+
+Archivo: Src/Modules/Infrastructure/NaoProvider/NaoProvider.{h,cpp}
+
+3.1 Transporte
+  - Socket UNIX de tipo stream en /tmp/robocup. Hasta 500 reintentos de
+    conexión al arrancar (20 ms entre intentos).
+  - Paquete recibido: MsgPack, hasta 896 bytes.
+  - Paquete enviado: MsgPack con 10 claves: "Position", "Stiffness" y 8
+    grupos de LEDs.
+
+3.2 Qué se envía en cada ciclo (sendPacket)
+  Para cada articulación excepto rHipYawPitch:
+    - Si angles[j] == off (10000) o stiffness[j] == 0:
+          Position  = ángulo MEDIDO actual (el motor no se fuerza)
+          Stiffness = 0.0
+    - En otro caso:
+          Position  = angles[j] + jointCalibration.offsets[j]
+          Stiffness = stiffnesses[j] * 0.01   (0..100 → 0.0..1.0)
+  No hay más filtrado en esta capa: lo que llega aquí va directo al motor.
+
+3.3 Qué se recibe (receivePacket / update(...))
+  "Position:i"    ángulo de cada articulación (rad) → JointSensorData.angles
+                  (se le RESTA el offset de calibración)
+  "Current:i"     corriente (A) → JointSensorData.currents en mA (x1000, short)
+  "Temperature:i" °C → JointSensorData.temperatures (unsigned char)
+  "Status:i"      estado de temperatura: 0 regular, 1 hot, 2 veryHot,
+                  3 criticallyHot
+  "Accelerometer" 3 floats (m/s²) → se INVIERTE el signo (acc *= -1)
+  "Gyroscope"     3 floats (rad/s)
+  "Angles"        2–3 floats: inclinación del torso que calcula LoLA
+  "FSR"           8 floats (4 por pie: fl, fr, bl, br), en kg
+  "Touch"         14 botones
+  "Battery"       nivel (0..1), estado de carga, corriente, temperatura
+  Las claves "Sonar" y "Stiffness" se ignoran.
+
+  rHipYawPitch NO se lee: se copia de lHipYawPitch (con la diferencia de
+  offsets de calibración), igual que su corriente, temperatura y estado.
+
+3.4 Orden de articulaciones de LoLA → índice de B-Human (jointMappings)
+  LoLA i  B-Human                LoLA i  B-Human
+  ------  ---------------------  ------  ---------------------
+    0     headYaw                  13    rHipRoll
+    1     headPitch                14    rHipPitch
+    2     lShoulderPitch           15    rKneePitch
+    3     lShoulderRoll            16    rAnklePitch
+    4     lElbowYaw                17    rAnkleRoll
+    5     lElbowRoll               18    rShoulderPitch
+    6     lWristYaw                19    rShoulderRoll
+    7     lHipYawPitch             20    rElbowYaw
+    8     lHipRoll                 21    rElbowRoll
+    9     lHipPitch                22    rWristYaw
+   10     lKneePitch               23    lHand
+   11     lAnklePitch              24    rHand
+   12     lAnkleRoll
+  ¡OJO! Este orden NO es el mismo que el enum de B-Human (sección 4). Si la
+  política se entrenó con el orden de LoLA, de URDF/MuJoCo o de NAOqi, hay
+  que reordenar explícitamente.
+
+3.5 Otros comportamientos de esta capa
+  - Botón del pecho mantenido 3 s → SIGINT → bhuman se apaga
+    (timeChestButtonPressedUntilShutdown).
+  - Cada 5 s se escribe /var/volatile/tmp/internalState.txt con
+    "batería(0..1) estadoCarga tempMáximaArticulación".
+
+===============================================================================
+4. LAS ARTICULACIONES
+===============================================================================
+
+4.1 Enum de B-Human (Src/Libs/RobotParts/Joints.h). La columna "idx" es la
+    posición en JointRequest.angles / JointAngles.angles (26 entradas).
+
+  Tabla completa con límites (Config/Robots/Default/jointLimits.cfg), stiffness
+  por defecto (Config/Robots/Default/stiffnessSettings.cfg) y el modelo de
+  motor del simulador (Config/Scenes/Includes/NaoV6H25.rsi2):
+
+  idx  articulación     mín [°]   máx [°]   stiff  SimRobot maxVel   maxForce
+  ---  ---------------  --------  --------  -----  ---------------  --------
+   0   headYaw          -119.5    119.5      70    474 (*)              5
+   1   headPitch         -38.5     29.5      70    412 (*)              6
+   2   lShoulderPitch   -119.5    119.5      10    600 °/s             16
+   3   lShoulderRoll     -18.0     76.0      20    600 °/s             16
+   4   lElbowYaw        -119.5    119.5      10    600 °/s             16
+   5   lElbowRoll        -88.5     -2.0      10    600 °/s             16
+   6   lWristYaw        -104.5    104.5      60    600 °/s             16
+   7   lHand               0.0     57.2958    0    —                    —
+   8   rShoulderPitch   -119.5    119.5      10    600 °/s             16
+   9   rShoulderRoll     -76.0     18.0      20    600 °/s             16
+  10   rElbowYaw        -119.5    119.5      10    600 °/s             16
+  11   rElbowRoll          2.0     88.5      10    600 °/s             16
+  12   rWristYaw        -104.5    104.5      60    600 °/s             16
+  13   rHand               0.0     57.2958    0    —                    —
+  14   lHipYawPitch      -65.62    42.44     75    500 °/s             24
+  15   lHipRoll          -21.74    45.29     75    500 °/s             24
+  16   lHipPitch         -88.0     27.73     75    330 °/s             16
+  17   lKneePitch         -5.29   121.04     75    500 °/s             16
+  18   lAnklePitch       -68.15    52.86     75    500 °/s             16
+  19   lAnkleRoll        -22.79    44.06     75    500 °/s             24
+  20   rHipYawPitch      -65.62    42.44     75    (independiente en sim; NO existe en el real)
+  21   rHipRoll          -45.29    21.74     75    500 °/s             24
+  22   rHipPitch         -88.0     27.73     75    330 °/s             16
+  23   rKneePitch         -5.90   121.47     75    500 °/s             16
+  24   rAnklePitch       -67.97    53.40     75    500 °/s             16
+  25   rAnkleRoll        -44.06    22.80     75    500 °/s             24
+  (*) en el .rsi2 de la cabeza maxVelocity no lleva unidad.
+  Los valores del simulador son su MODELO, no datos medidos del motor real.
+  Bajo carga el motor real es más lento, sobre todo en caderas, rodillas y
+  tobillos.
+
+  Notas:
+  - lHand/rHand no son ángulos sino apertura: 0..1 representado como
+    0..57.2958° (= 1 rad).
+  - Límite de la cabeza: además de jointLimits hay headLimits.cfg, con el
+    pitch permitido en función del yaw, para que la cabeza no choque con los
+    hombros. El MotionEngine solo aplica jointLimits; headLimits lo usa el
+    HeadMotionEngine.
+  - Los límites de las piernas son asimétricos (rodilla derecha -5.90..121.47,
+    izquierda -5.29..121.04). Una política que suponga simetría perfecta
+    puede pedir algo que se recorte distinto en cada lado.
+
+4.2 Stiffness: lo que realmente significa
+  - Valor 0..100 en B-Human. 0 = motor libre (en esta capa además se envía
+    como objetivo el ángulo medido).
+  - StiffnessData::useDefault (-1) = usar stiffnessSettings.cfg.
+  - El walking engine usa 100 al caminar (walkStiffness), 30 si no hay
+    contacto con el suelo (pickedUpStiffness), y baja a la stiffness por
+    defecto (75) cuando lleva quieto un rato (energy saving).
+  - En el NAO la stiffness limita el par/corriente disponible del
+    controlador interno del motor; no es una ganancia proporcional que se
+    pueda igualar a una kp de simulador. Con stiffness 100 el error de
+    seguimiento depende de la carga y del juego del engranaje.
+    Recomendación: identificar la respuesta (escalón y seno) de cada
+    articulación de pierna en el robot suspendido, con la stiffness que se
+    vaya a usar, y meter ese modelo (retardo + ancho de banda + saturación de
+    velocidad) en el simulador de entrenamiento.
+
+4.3 Temperatura y corriente
+  - JointSensorData.status: regular / hot / veryHot / criticallyHot.
+  - RobotHealthProvider dice "Heat" (hot), "Fire" (veryHot) o
+    "Fire exclamation mark" (criticallyHot)
+    (Src/Modules/Infrastructure/RobotHealthProvider/RobotHealthProvider.cpp).
+    Ayer (2026-10-28) juan dijo "Heat" al final de la sesión.
+  - Mantener un motor contra un tope o contra el suelo con stiffness alta
+    calienta en segundos. Es el modo de daño más probable para una política
+    que "empuja" contra el piso o que mantiene una pose forzada.
+  - EnergySavingProvider (Config/Robots/Default/energySavingProvider.cfg)
+    ajusta poco a poco los ángulos en stand para bajar la corriente:
+    currentThresholdLegs = 100 mA, ajustes de hasta 1.5° (varias) / 3°
+    (una). Solo actúa en las fases de stand del walking engine, no en una
+    política propia.
+
+===============================================================================
+5. CONVENCIONES DE SIGNOS, EJES Y ESPEJADO
+===============================================================================
+
+5.1 Ejes del robot (B-Human): x hacia delante, y hacia la izquierda, z hacia
+    arriba. Rotación positiva = antihoraria vista desde arriba (regla de la
+    mano derecha).
+
+5.2 Signos de las articulaciones de las piernas (de la IK,
+    Src/Tools/Motion/InverseKinematic.cpp, y de las poses en
+    staticJointPoses.cfg):
+    - HipPitch negativo   = muslo hacia delante (flexión de cadera).
+    - KneePitch positivo  = rodilla flexionada (0 = pierna recta).
+    - AnklePitch negativo = punta del pie hacia arriba (dorsiflexión) con la
+      pierna en postura de stand.
+    - HipRoll/AnkleRoll: positivo = rotación alrededor de +x. La pierna
+      izquierda abre con HipRoll positivo y la derecha con HipRoll negativo.
+    - HipYawPitch: eje inclinado 45° en el plano y-z. Una sola articulación
+      física para las dos piernas.
+
+5.3 Espejado izquierda/derecha (Joints::mirror y Joints::canNegate)
+    Se NIEGAN al espejar: headYaw, ShoulderRoll, ElbowYaw, ElbowRoll,
+    WristYaw, HipRoll, AnkleRoll.
+    NO se niegan: ShoulderPitch, Hand, HipYawPitch, HipPitch, KneePitch,
+    AnklePitch.
+    Si en el entrenamiento se usó simetría (data augmentation por espejo), la
+    regla tiene que ser exactamente esta.
+
+5.4 IMU (sección 6.3): gyro en rad/s en el marco del torso; aceleración en
+    m/s². Después de la inversión de signo de NaoProvider, con el robot
+    quieto y derecho la aceleración apunta +z (≈ +9.81). Hay que comprobar la
+    convención del simulador de entrenamiento, porque muchos simuladores dan
+    la aceleración propia con el signo contrario.
+
+===============================================================================
+6. SENSORES: QUÉ LLEGA, EN QUÉ UNIDADES, CON QUÉ RETARDO
+===============================================================================
+
+6.1 Ángulos de articulaciones
+  - JointSensorData.angles (rad), una vez por ciclo de 12 ms.
+  - La posición medida refleja el comando con ~3 ciclos (≈36 ms) de retraso.
+    B-Human lo asume en varios sitios:
+      * JointAnglePredictor usa los últimos 3 comandos y las últimas 3
+        lecturas para predecir los ángulos de las piernas
+        (Src/Modules/Sensing/JointAnglePredictor/, red
+        Config/NeuralNets/JointAngle/lstm_i03l5u48.onnx, entrada 3x22,
+        salida 11 articulaciones de pierna).
+      * walkDelayParameters.minDelay = 0.03601 s ("3 frames + some more").
+  - JointPlay estima el juego (holgura) de cada articulación y una
+    "qualityOfRobotHardware" que reduce las velocidades máximas del walking
+    engine en robots desgastados.
+  - No hay velocidad articular medida: si la política la usa como
+    observación, hay que derivarla (diferencia finita), y es ruidosa por la
+    resolución del encoder y el juego mecánico. NaoProvider declara una
+    varianza de 0.00064 deg² por lectura de ángulo.
+
+6.2 Corriente y temperatura: sección 4.3.
+
+6.3 IMU
+  - Datos crudos de LoLA: InertialSensorData.gyro (rad/s), .acc (m/s²,
+    signo invertido), .angle (inclinación calculada por LoLA).
+  - InertialDataProvider (Src/Modules/Sensing/InertialDataProvider/):
+      1. Rota gyro y acc con IMUCalibration (en juan ~3° alrededor de y).
+      2. Multiplica el gyro por gyroFactor (juan: 1,1,1).
+      3. UKF de orientación → orientation2D (sin yaw), orientation3D,
+         angle (roll/pitch del torso).
+  - GyroOffsetProvider: al arrancar, con el robot quieto y apoyado en
+    playDead, promedia el gyro ~1 s. Si alguna media supera 3°/s
+    (thresholdZero), marca isIMUBad y el MotionEngine fuerza playDead
+    ("Please reboot me. My gyros have an offset of N degrees!"). Le pasó a
+    juan hoy, ver sección 16.
+  - Varianzas (Config/Robots/Default/inertialDataProvider.cfg): gyro
+    3.87e-6 (rad/s)², acc 0.022 (m/s²)².
+  Recomendación: si la política usa la orientación, entrenar con ruido y
+  sesgo al menos de este orden, y con un sesgo constante de hasta ±3°/s
+  en el gyro (lo que GyroOffsetProvider todavía acepta).
+
+6.4 FSR (sensores de presión de los pies)
+  - 4 por pie (fl, fr, bl, br), en kg. Posiciones en
+    Config/Robots/Default/robotDimensions.cfg (leftFsrPositions /
+    rightFsrPositions, mm respecto al origen de la suela).
+  - FsrDataProvider (Config/Robots/Default/fsrDataProvider.cfg): minPressure
+    0.3, maxPressure 5. isCalibrated = false en Default.
+  - GroundContactDetector (groundContactDetector.cfg): se pierde el
+    contacto si la presión se queda bajo el mínimo más de 200 ms; se recupera
+    con 100 ms de presión.
+  - Los FSR del NAO son ruidosos y se descalibran. Son útiles como señal
+    binaria de apoyo, pero poco fiables como fuerza.
+
+6.5 Estados derivados que conviene usar como guardas
+  - FallDownState.state: pickedUp, upright, staggering, falling, fallen,
+    squatting (Src/Representations/Sensing/FallDownState.h).
+  - GroundContactState.contact.
+  - RobotStableState (dónde está el CoM respecto a cada pie).
+  - GyroState (media y desviación del gyro en ventana; notMovingSinceTimestamp).
+
+===============================================================================
+7. MotionEngine: CÓMO SE DECIDE QUÉ MUEVE LAS ARTICULACIONES
+===============================================================================
+
+Archivo: Src/Modules/MotionControl/MotionEngine/MotionEngine.{h,cpp}
+Es el ÚNICO proveedor de JointRequest (threads.cfg:
+{representation = JointRequest; provider = MotionEngine;}).
+
+7.1 Conceptos
+  - MotionRequest (lo produce Cognition): motion ∈ {playDead, stand,
+    walkAtAbsoluteSpeed, walkAtRelativeSpeed, walkToPose, walkToBallAndKick,
+    dribble, dive, special, replayWalk, calibration} + parámetros.
+  - MotionPhase (Src/Tools/Motion/MotionPhase.h): un movimiento en curso.
+    Tipos: playDead, stand, walk, kick, fall, getUp, keyframeMotion,
+    replayWalk, calibration. Métodos:
+      update()            — avanza el estado interno
+      isDone(request)     — ¿se puede cambiar de fase ahora?
+      calcJoints(...)     — escribe el JointRequest de este ciclo
+      createNextPhase(..) — fase de continuación obligatoria
+      freeLimbs()         — qué partes (cabeza, brazos) quedan libres
+  - MotionGenerator: fábrica de fases, una por tipo de MotionRequest.
+
+7.2 Qué pasa en cada ciclo de 12 ms (MotionEngine::update(JointRequest&))
+  1. phase->update().
+  2. Comprobación de seguridad del sistema:
+       - Si el gyro tiene offset (isIMUBad) o la calibración del gyro no ha
+         terminado → forceSitDown.
+       - Si en robot real, con más de 110 s desde el arranque, Upper, Lower
+         o Cognition llevan más de 3000 ms sin datos → forceSitDown
+         ("I blind help mee!").
+       - forceSitDown hace motion = playDead.
+  3. Levantarse: si FallDownState es fallen o squatting y no se pidió
+     playDead/dive → getUp.
+  4. FallEngine: si FallDownState == falling (y no en keyframe, getUp ni
+     playDead) → FallPhase inmediata (protege brazos y cabeza al caer).
+  5. Si la fase actual isDone() → crea la nueva desde el generador de la
+     petición (o intercepción / getUp) y aplica createNextPhase.
+  6. Cabeza y brazos si freeLimbs() lo permite (HeadMotionEngine,
+     ArmKeyFrameEngine, PointAtEngine).
+  7. phase->calcJoints() rellena el resto.
+  8. MotionUtilities::copy: convierte ignore/off/useDefault. Las
+     articulaciones en "ignore" mantienen el último valor y "useDefault" pasa
+     a stiffnessSettings.
+  9. Recorte de cada ángulo a jointLimits (excepto la cabeza en modo
+     calibración).
+     Solo en Debug: si hay NaN, Inf o "ignore", FAIL.
+ 10. jointsToEraseStiffness (damageConfigurationBody.cfg) → stiffness 0.
+ 11. Articulaciones con salto de sensor "broken" en lAnkleRoll/rAnkleRoll →
+     stiffness ≤ brokenJointAutomaticStiffness (100, es decir, sin efecto real
+     hoy).
+ 12. Toda articulación con stiffness 0 copia como objetivo el ángulo medido.
+ 13. Odometría.
+
+7.3 Fase inicial: PlayDeadPhase (stiffness 0 en todo). Para salir de ella
+    el torso tiene que estar derecho (|roll| < 20°, |pitch| < 50°); si no,
+    dice "Please hold my upper body upright". La salida es SIEMPRE hacia
+    stand: el walking engine interpola de la pose actual a stand a
+    standInterpolationVelocity = 70°/s.
+
+===============================================================================
+8. EL WALKING ENGINE DE B-HUMAN, PASO A PASO
+===============================================================================
+
+Archivos: Src/Modules/MotionControl/WalkingEngine/WalkingEngine.{h,cpp},
+          WalkLibs/WalkPhaseBase.{h,cpp}, WalkLibs/WalkStepAdjustment.*,
+          WalkLibs/WalkDelayPhase.cpp, WalkGenerators/*.
+Parámetros: Config/Robots/Default/walkingEngineCommon.cfg (común) y
+            Config/Robots/Default/walkingEngine.cfg (velocidades).
+Basado en el walk de rUNSWift 2014 (FSR para cambiar de apoyo, gyro
+proporcional en tobillos).
+
+8.1 Idea general
+  Es una caminata cinemática con realimentación sencilla, no un controlador
+  de ZMP ni MPC:
+    - Cada paso dura ~250 ms (baseWalkPeriod). En cada paso un pie es de
+      apoyo y el otro de vuelo.
+    - En cada ciclo calcula la pose 3D de cada suela respecto al torso
+      (posición x, y, altura del pie, giro z, inclinación de la suela) con
+      interpolaciones en el tiempo del paso.
+    - Convierte esas poses en ángulos con cinemática inversa analítica.
+    - Encima suma correcciones: gyro → tobillo/cadera, regulación de
+      velocidad articular, compensación del juego y de los brazos.
+    - El cambio de pie de apoyo lo deciden los FSR (o un tiempo límite), no
+      un reloj fijo.
+
+8.2 De la petición al paso
+  - walkAtRelativeSpeed: walkSpeed en fracción [-1, 1] de la velocidad
+    máxima (Carril usa esto). walkAtAbsoluteSpeed: mm/s y rad/s.
+    (WalkGenerators/WalkAtSpeedEngine.cpp)
+  - Velocidades máximas (walkingEngine.cfg → WalkingEngineOutput):
+        maxSpeed        x = 250 mm/s, y = 200 mm/s, rot = 120 °/s
+        minSpeed        x = 220, y = 180, rot = 100 (robot "desgastado")
+        maxSpeedBackwards = 150 mm/s (min 125)
+    Se interpola entre max y min según JointPlay.qualityOfRobotHardware.
+  - Tamaño máximo de paso = velocidad x 0.25 s (y lateral x 2 por el doble
+    paso).
+  - El paso se recorta a un "polígono de traslación" que depende de la
+    rotación pedida (stepSizeParameters: con 24°/45.4° de giro ya no se
+    permite traslación en x/y).
+  - Aceleración limitada por paso: maxAcceleration x = 75, y = 200
+    mm/s/paso; maxDeceleration x = 300, y = 240. (En el robot real se
+    midieron ~120 mm/s reales al pedir 0.8; ver BITACORA_ROBOT_REAL.md.)
+
+8.3 Geometría (kinematicParameters)
+  walkHipHeight = 230 mm, torsoOffset = 12 mm (torso adelantado respecto a
+  los tobillos), baseFootLift = 13 mm (altura de paso), sidewaysHipShiftFactor
+  0.53. Pose de cada suela (WalkingEngine::calcFeetPoses):
+      pie_izq = T(0, +yHipOffset, 0) · T(forwardL - torsoOffset, sideL,
+                -(walkHipHeight - footHL)) · Rz(turn) · Ry(soleRotY) · Rx(soleRotX)
+      pie_der = igual con -yHipOffset y -turn
+  Dimensiones (robotDimensions.cfg): yHipOffset 50, upperLegLength 100,
+  lowerLegLength 102.9, footHeight 45.19 (mm).
+
+8.4 Cinemática inversa (Src/Tools/Motion/InverseKinematic.cpp)
+  calcLegJoints(pieIzq, pieDer, inclinaciónCuerpo, ...) resuelve las 6
+  articulaciones de cada pierna. Como HipYawPitch es compartida, la calcula
+  para cada pierna y combina (ratio, por defecto 0.5) un único valor para las
+  dos. Si un objetivo es inalcanzable, el coseno se recorta a [-1, 1] (pierna
+  estirada) y la función devuelve false; en calcJoints eso es VERIFY (no
+  aborta en Release).
+
+8.5 Realimentación (lo que hace que no se caiga)
+  a) Gyro sagital → tobillo del pie de apoyo
+     filteredGyroY = 0.6·anterior + 0.4·gyroY
+     ΔanklePitch = filteredGyroY x 0.05 (gyroForward/BackwardBalanceFactor),
+     a la mitad en stand. WalkLearner puede ajustar estos factores.
+  b) Gyro → cadera (hipPitch) solo durante y poco después de las patadas
+     (factor 0.025).
+  c) Gyro lateral → tobillos (roll) solo en stand (factor 0.05).
+  d) "Knee balance": rota la tibia del pie de apoyo según el gyro, limitado
+     a maxGyroBalanceKneeValue = 2°.
+  e) El tobillo de apoyo solo puede mantener o aumentar el pitch dentro del
+     paso (currentMaxAnklePitch); el comentario del código dice que es para
+     no romper tobillos.
+  f) WalkStepAdjustment: si el CoM se sale del área deseada del pie
+     (desiredFootArea 0.25–0.6) mueve los pies para recuperar el equilibrio
+     y reduce la velocidad unos pasos.
+  g) Rotación de la suela del pie en vuelo (soleRotationParameter) para que
+     no toque el suelo antes de tiempo.
+  h) JointSpeedRegulator: limita la velocidad de cambio de cada articulación
+     (speedRegulatorParams) según el error de inclinación medido.
+  i) JointPlayOffsetRegulator: suma offsets para compensar el juego
+     mecánico medido.
+  j) Emergency step: si el robot está atascado (p. ej. contra un poste) da
+     un paso lateral de 20 mm.
+  k) Si el pie de vuelo toca suelo pronto (FSR) con suficiente fase
+     (minPhaseForStopWithWrongGroundContact = 0.35) congela el movimiento.
+
+8.6 Brazos
+  Mientras camina, el walking engine pone los brazos: shoulderPitch = 90° +
+  (x del pie + torsoOffset) x 6 / 1000, shoulderRoll = 7° + |y| x 2 / 1000,
+  elbows 0, wristYaw ∓90°. Si otro motor controla los brazos, inclina el torso
+  para compensar el CoM (compensateArms).
+
+8.7 Stiffness del walking engine
+  - Caminando: 100 en todas las articulaciones de las piernas.
+  - Sin contacto con el suelo: 30 (applyLegStiffness: "Make sure the robot
+    does not break if something is wrong").
+  - Quieto en stand > 200 ms y sin moverse 500 ms: stiffness por defecto
+    (75), y EnergySaving ajusta ángulos.
+  - standHigh: 40 en piernas, 60 en anklePitch.
+
+8.8 Cuándo termina un paso (WalkPhase::isDone)
+  Por cambio de apoyo predicho, normal, abortado, por sobretiempo, por
+  aborto de pasos de los pies o por atasco (supportSwitchInfo). El rango
+  permitido de fase para el cambio es supportSwitchPhaseRange = 0.5..10.
+
+8.9 Lo que esto implica para comparar con una política
+  El walking engine de B-Human tiene MUCHA lógica de protección implícita:
+  velocidades limitadas, aceleración por paso limitada, pies que nunca se
+  cruzan (polígono), stiffness reducida sin contacto, tobillo que no
+  "empuja", ajuste de pasos ante desequilibrio y transición suave
+  stand↔walk. Una política de articulaciones reemplaza TODO eso y tiene que
+  traer sus propias garantías.
+
+===============================================================================
+9. POSES DE REFERENCIA
+===============================================================================
+
+9.1 Stand del walking engine (estimación propia, NO leída del robot)
+  Calculada con la misma IK, pies bajo la cadera, sin giro ni inclinación,
+  hipHeight = 230, torsoOffset = 12, sin compensación de brazos ni gyro:
+       hipPitch ≈ -20.8°, kneePitch ≈ +48.2°, anklePitch ≈ -27.5°,
+       hipRoll ≈ 0, ankleRoll ≈ 0, hipYawPitch ≈ 0.
+  Otras alturas: 220 mm → -26.8 / 60.6 / -33.7; 210 → -31.9 / 71.0 / -39.1.
+  Antes de fiarse de estos números hay que medir los ángulos reales en
+  stand con SimRobot conectado al robot (vista de JointSensorData/
+  JointRequest). Si la pose inicial de la política difiere mucho de esto, la
+  transición stand → política es un punto crítico.
+
+9.2 Sentado (Config/Robots/Default/staticJointPoses.cfg, "sit")
+  hipPitch -40°, knee 110°, anklePitch -45°, shoulderPitch 77°,
+  shoulderRoll ±20°, elbowRoll ∓35°, wristYaw ∓90°.
+  De aquí se sale siempre a stand interpolando a 70°/s.
+
+===============================================================================
+10. CAPAS DE SEGURIDAD QUE YA EXISTEN
+===============================================================================
+
+  Capa                         Dónde                    ¿Protege a una política de articulaciones?
+  ---------------------------  -----------------------  -------------------------------------------
+  Recorte a jointLimits        MotionEngine.cpp         SÍ, si sale por el MotionEngine
+  Chequeo NaN/Inf              MotionEngine.cpp         SOLO en Debug → NO en el robot
+  forceSitDown (gyro/visión)   MotionEngine.cpp         SÍ, si la política es una MotionPhase
+  FallEngine al caer           FallEngine.cpp           SÍ, si la política es una MotionPhase
+                                                        (se dispara con state == falling)
+  GetUp tras caída             MotionEngine.cpp         SÍ (reemplaza la fase)
+  Stiffness 30 sin contacto    WalkingEngine.cpp        NO (es interna del walking engine)
+  Límite de velocidad articular WalkingEngine (Regulator) NO
+  Límite de aceleración        WalkingEngine            NO
+  Energy saving / calor        EnergySavingProvider     NO (solo stand del walking engine)
+  Aviso de temperatura         RobotHealthProvider      Solo avisa (voz), no actúa
+  Botón del pecho 3 s          NaoProvider              SÍ, apaga bhuman (stiffness 0)
+  jointsToEraseStiffness       MotionEngine.cpp         SÍ
+
+  Hay que añadir, como mínimo:
+    - Filtro NaN/Inf siempre activo (también en Release).
+    - Límite de cambio por ciclo (rate limit) por articulación.
+    - Margen interior a los límites (no ir al tope mecánico).
+    - Corte por temperatura/estado (≥ hot → bajar stiffness o detener).
+    - Corte por corriente sostenida.
+    - Corte por orientación del torso / caída → ceder a FallEngine.
+    - Corte por pérdida de contacto (robot levantado) → stiffness baja.
+    - Watchdog: si la red no responde en el ciclo, mantener la última acción
+      válida unos pocos ciclos y luego pasar a stand.
+
+===============================================================================
+11. SIMULADOR (SimRobot) vs ROBOT REAL
+===============================================================================
+
+SimulatedRobot3D::getAndSetJointData (Src/Libs/SimulatedNao/SimulatedRobot3D.cpp):
+
+  1. STIFFNESS IGNORADA. Solo se aplica el ángulo; el motor simulado es un
+     servo con p = 20/80, i = 50 y maxForce/maxVelocity fijos. Una política
+     que en SimRobot "funciona" con stiffness 30 puede no funcionar en el
+     real, y al revés.
+  2. rHipYawPitch es una articulación independiente en el .rsi2. En el real
+     es la misma que lHipYawPitch. Una política que use los dos valores
+     distintos hará algo distinto en el real.
+  3. Corrientes = off, temperaturas = 0, estado = regular: la política nunca
+     vio calentamiento.
+  4. walkingEngine resta 3 ciclos a la duración del paso en simulación
+     (stepDurationOffset) para que el robot simulado se parezca al real; hay
+     un "Correction factor for simulation" en WalkingEngine.cpp.
+  5. No hay juego mecánico ni retardo de 3 ciclos como en el real (la
+     lectura del ángulo es la del motor simulado).
+  6. Física ODE con pasos fijos: fricción y contacto idealizados.
+
+Si la política se entrenó en MuJoCo, Isaac, etc., compara también:
+  - Masas y CoM por segmento con Config/Robots/Default/massCalibration.cfg
+    (masa total ≈ 5.3 kg; torso 1049.6 g, muslo 389.7 g, tibia 301.4 g,
+    pie 171.8 g, cabeza 659.4 g + cuello 78.4 g...).
+  - Longitudes con robotDimensions.cfg.
+  - Límites de la sección 4.
+  - Que rHipYawPitch esté acoplada (equality constraint o tendón).
+  - Modelo del actuador: retardo ≥ 1–3 ciclos, saturación de velocidad,
+    par limitado, juego. Sin esto el sim2real del NAO suele fallar.
+
+===============================================================================
+12. EJECUTAR UNA RED ONNX EN EL ROBOT
+===============================================================================
+
+12.1 Cómo se hace hoy
+  - Src/Libs/RL/PPOPolicyModel.cpp carga el .onnx con NeuralNetworkONNX::
+    CompiledNN (Util/CompiledNN2ONNX/include/CompiledNN2ONNX/CompiledNN.h),
+    que es un envoltorio de ONNX Runtime con la misma API que CompiledNN.
+  - En el robot se usa libonnxruntime.so.1.10.0 (está en /home/nao/Config/).
+  - Las rutas relativas se resuelven contra File::getBHDir(); los modelos
+    viven en Config/NeuralNets/<carpeta>/.
+  - Comprobar el número y la forma de las salidas al cargar (como hace
+    PPOPolicyModel) y fallar de forma segura si no coinciden.
+
+12.2 Requisitos para exportar
+  - Opset compatible con ORT 1.10 (opset ≤ 15). Recomendación: exportar con
+    opset 13–15 y probar a cargarlo con onnxruntime==1.10.0 en el PC antes
+    de desplegar.
+  - Entrada y salida float32, batch fijo 1, sin ejes dinámicos innecesarios.
+  - Incluir dentro del ONNX solo la red determinista (la media de la
+    acción, sin muestreo ni log_std). La normalización de observaciones,
+    si no está dentro del grafo, hay que replicarla en C++ con exactamente
+    las mismas constantes (como PPOObservationEncoder).
+  - Si la red es recurrente (LSTM/GRU), el estado oculto tiene que ser
+    entrada/salida explícita y reiniciarse igual que en el entrenamiento.
+
+12.3 Tiempo de cómputo
+  - El Atom E3845 es lento: una MLP pequeña (p. ej. 2–3 capas de 256)
+    debería tardar del orden de décimas de ms, pero NO hay medición en este
+    repo. Hay que medir en el robot el tiempo por inferencia (peor caso, no
+    promedio) antes de ponerla en el hilo Motion.
+  - El hilo Motion tiene prioridad RT 20 sobre un kernel PREEMPT_RT: si
+    ORT crea hilos propios, pueden competir con él. Recomendación: sesión
+    con intra_op_num_threads = 1 e inter_op = 1 para inferencia en Motion.
+
+===============================================================================
+13. TRES FORMAS DE CONECTAR UNA POLÍTICA PROPIA
+===============================================================================
+
+A) Política de alto nivel → MotionRequest (lo que ya hacen las PPO del equipo
+   y CarrilBehavior)
+   - La red decide velocidad/objetivo; el walking engine de B-Human mueve las
+     articulaciones. Corre en Cognition (~30 Hz).
+   - Riesgo de daño mecánico: BAJO (todas las protecciones de la sección 8
+     siguen activas).
+   - Revisar: rango de walkSpeed (relativo [-1, 1] o mm/s), latencia,
+     oscilaciones de la orden (el walking engine solo cambia al final de cada
+     paso de 250 ms, con aceleración limitada).
+
+B) Política de pasos → WalkGenerator::createPhase(stepTarget, ...)
+   - La red decide el siguiente paso (Pose2f en mm/rad respecto al pie de
+     apoyo); el walking engine sigue haciendo IK, balance y stiffness. Es
+     posible como un generador nuevo que llame a theWalkGenerator.createPhase
+     (ver WalkAtSpeedEngine.cpp como ejemplo).
+   - Riesgo: BAJO–MEDIO. El paso se recorta al polígono de traslación.
+
+C) Política de articulaciones → ángulos en cada ciclo de 12 ms
+   - Reemplaza al walking engine. Hoy NO existe camino en el código para
+     esto: RLSharedState solo exporta motionJointAngles para depuración, no
+     los recibe.
+   - Riesgo: ALTO. Hay que implementarla como una MotionPhase nueva, para
+     que el MotionEngine siga pudiendo:
+       * cortarla con forceSitDown,
+       * pasar a FallPhase al caer,
+       * recortar a jointLimits.
+   Esqueleto recomendado (en Motion, NO en Cognition):
+
+     struct PolicyPhase : MotionPhase
+     {
+       // type: añadir un MotionPhase::Type propio o reutilizar walk con cuidado
+       bool isDone(const MotionRequest& r) const override
+       {
+         // Solo soltar el control cuando la política esté en una pose estable
+         // (cerca de stand), o inmediatamente si r.motion == playDead.
+       }
+       void calcJoints(const MotionRequest& r, JointRequest& out,
+                       Pose2f& odometryOffset, MotionInfo& info) override
+       {
+         // 1. Construir observación EXACTAMENTE como en el entrenamiento
+         //    (orden, unidades, signos, normalización, historial).
+         // 2. Inferencia (medir tiempo; si excede, reusar última acción).
+         // 3. Filtro: si !isfinite → reusar última acción válida y contar
+         //    fallo; N fallos seguidos → stand/playDead.
+         // 4. Acción → ángulos objetivo (p. ej. pose_nominal + escala*acción).
+         // 5. Rate limit por articulación: |Δ| ≤ maxVel*0.012 s.
+         // 6. Margen a límites: recortar a [min+m, max-m].
+         // 7. HipYawPitch: un único valor para l y r.
+         // 8. Stiffness: la validada (no 100 por defecto); bajar si
+         //    !GroundContactState.contact o FallDownState != upright.
+         // 9. Guardas: temperatura ≥ hot, corriente alta sostenida, torso
+         //    fuera de rango → terminar fase.
+         //10. Brazos/cabeza: o los controla la política o se dejan en una
+         //    pose fija (freeLimbs()).
+       }
+     };
+
+   Entrada y salida de la política:
+     - Rampa de entrada: desde stand de B-Human, interpolar en ~0.5–1 s a la
+       pose nominal de la política con la política aún sin controlar, y
+       solo entonces cederle el control.
+     - Rampa de salida: interpolar de vuelta a una pose desde la que
+       WalkingEngine pueda tomar el control (stand).
+
+===============================================================================
+14. LISTA DE VERIFICACIÓN DE LA POLÍTICA ENTRENADA
+===============================================================================
+
+Marcar cada punto con evidencia (archivo, gráfica, número), no de memoria.
+
+  Frecuencia y tiempo
+  [ ] Frecuencia de control del entrenamiento = 83.3 Hz (o decimación
+      explícita y documentada, p. ej. 41.7 Hz manteniendo la acción 2 ciclos).
+  [ ] Retardo acción → efecto y observación modelados (≥ 1–3 ciclos),
+      aleatorizados.
+  [ ] Tiempo de inferencia medido en el Atom (peor caso) < 2–3 ms.
+
+  Espacio de acción
+  [ ] Orden de articulaciones mapeado explícitamente al enum de B-Human
+      (sección 4) y probado con un test articulación por articulación.
+  [ ] Unidades en radianes; signos como en la sección 5 (probar moviendo
+      una articulación a +10° en el sim y en el real suspendido).
+  [ ] HipYawPitch: un solo valor.
+  [ ] Todas las acciones posibles caen dentro de los límites con margen; la
+      distribución de acciones en el sim no toca los topes.
+  [ ] Velocidad articular pedida < velocidad del motor real con carga
+      (usar ≤ 300 °/s en caderas/rodillas/tobillos como tope conservador,
+      recomendación).
+  [ ] Sin cambios de signo de alta frecuencia (vibración): espectro de la
+      acción en simulación sin energía apreciable sobre ~10 Hz.
+  [ ] Stiffness definida y validada en el real (no asumir kp del sim).
+
+  Observación
+  [ ] Ángulos medidos con el retraso del real (o JointAnglePred).
+  [ ] Velocidades articulares derivadas con el mismo filtro que en
+      entrenamiento.
+  [ ] IMU en el marco y signo de B-Human (gyro rad/s, acc +z arriba),
+      calibración de juan aplicada (InertialData, no InertialSensorData,
+      si en el sim el IMU estaba alineado).
+  [ ] Normalización idéntica (mismas medias/desviaciones, mismos clips).
+  [ ] Comportamiento ante observaciones fuera de distribución probado
+      (levantado, empujado, de lado).
+
+  Dinámica
+  [ ] Masas, CoM, longitudes y límites iguales a los .cfg de B-Human.
+  [ ] Aleatorización de masa (±10 %), fricción, retardo, ruido de sensores,
+      juego articular (≥ 1–2°) y fuerza del motor.
+  [ ] Penalizaciones de par, potencia, action rate y contacto con topes en
+      la recompensa (calor y desgaste).
+  [ ] Pose inicial del episodio alcanzable desde el stand de B-Human.
+
+  Seguridad
+  [ ] NaN/Inf → acción segura.
+  [ ] Caída detectada → ceder a FallEngine (stiffness baja en piernas).
+  [ ] Robot levantado → stiffness baja, sin "patalear".
+  [ ] Temperatura ≥ hot → parar.
+  [ ] Watchdog de inferencia.
+
+===============================================================================
+15. PROTOCOLO DE PRUEBAS EN EL ROBOT REAL (recomendado)
+===============================================================================
+
+Condiciones previas a cualquier prueba:
+  - Batería > 50 % (hoy juan está en ~4 %).
+  - Temperatura máxima de articulaciones < 50 °C y estado "regular"
+    (internalState.txt, o el aviso "Heat").
+  - Arranque con el robot quieto en el suelo, sin offset de gyro (sección 16).
+  - Una persona con la mano en el arnés y otra junto al botón del pecho
+    (3 s = apagar bhuman → stiffness 0).
+  - Superficie: la duela de la competencia o similar, no alfombra blanda.
+
+Etapas (no pasar a la siguiente sin superar la anterior):
+  E0  Offline: reproducir con la red observaciones grabadas de logs del
+      robot real (bhumand y .log de B-Human) y comprobar que las acciones
+      están en rango, sin NaN y suaves.
+  E1  SimRobot con la política integrada como MotionPhase (sabiendo que
+      ignora la stiffness): integración, signos, orden, guardas.
+  E2  Robot SUSPENDIDO (pies sin tocar el suelo), stiffness 20–30, política
+      con escala de acción 0.25: ver que cada articulación se mueve en el
+      sentido esperado, sin vibración; medir corrientes y temperaturas.
+  E3  Suspendido, stiffness objetivo, escala 1.0, 30 s. Medir temperatura
+      antes/después.
+  E4  En el suelo con arnés, solo mantener la pose (stand de la política),
+      10–20 s.
+  E5  En el suelo con arnés, caminar despacio 3–5 pasos. Abortar ante
+      tambaleo, ruido raro de engranajes, vibración o "Heat".
+  E6  Aumentar duración y velocidad por escalones, como en
+      BITACORA_ROBOT_REAL.md.
+  Registrar cada prueba en Util/CarrilTools/BITACORA_ROBOT_REAL.md (o en
+  una bitácora propia de la política): fecha, versión de la red, parámetros,
+  batería, temperaturas, resultado y decisión.
+
+Criterios de aborto inmediato (botón del pecho o pasar a playDead):
+  - Vibración o zumbido sostenido en una articulación.
+  - Golpe de una articulación contra el tope.
+  - "Heat"/"Fire" o estado ≥ hot.
+  - Pérdida de equilibrio que no se recupera en un paso.
+  - Cualquier comportamiento distinto del simulado que no se entienda.
+
+===============================================================================
+16. ESTADO OBSERVADO DE juan EL 2026-10-29
+===============================================================================
+
+  - Dos arranques seguidos (bhumand_(33) y (34)) con "Gyro has Offset ... 7
+    degrees"; el MotionEngine forzaba playDead. Tras apagado en frío y
+    encendido quieto en el suelo (bhumand_(35)) ya no apareció. Si vuelve a
+    pasar con el robot quieto, revisar el IMU (hardware).
+  - 2026-10-28, final de la sesión: aviso "Heat" (alguna articulación en
+    estado hot).
+  - Batería: internalState.txt marcaba 0.03 → 0.04 (3–4 %) y cargando.
+  - Temperatura máxima de articulaciones al revisar: 38 °C.
+  - Escenario desplegado: Carril (location 4v4_Full). Binario
+    /home/nao/Config/bhuman del 2026-10-28 21:25.
+
+===============================================================================
+17. ÍNDICE DE ARCHIVOS
+===============================================================================
+
+  Interfaz hardware ..... Src/Modules/Infrastructure/NaoProvider/NaoProvider.{h,cpp}
+  Hilo Motion ........... Src/Threads/Motion.cpp
+  Ciclo ................. Src/Libs/MathBase/Constants.h (motionCycleTime)
+  Hilos y proveedores ... Config/Scenarios/{Default,Carril}/threads.cfg
+  Orden de configs ...... Src/Libs/Framework/Settings.cpp
+  Articulaciones ........ Src/Libs/RobotParts/Joints.h
+  JointRequest .......... Src/Representations/Infrastructure/JointRequest.h,
+                          JointAngles.h, StiffnessData.h
+  Valores especiales .... Src/Tools/Motion/SensorData.h (off = 10000, ignore = 20000)
+  MotionEngine .......... Src/Modules/MotionControl/MotionEngine/MotionEngine.{h,cpp}
+  Fases ................. Src/Tools/Motion/MotionPhase.h, MotionGenerator.h,
+                          MotionUtilities.{h,cpp}
+  Walking engine ........ Src/Modules/MotionControl/WalkingEngine/
+  IK .................... Src/Tools/Motion/InverseKinematic.cpp
+  Caídas ................ Src/Modules/MotionControl/FallEngine/FallEngine.cpp,
+                          Src/Modules/Sensing/FallDownStateDetector/
+  Gyro offset ........... Src/Modules/Sensing/GyroOffsetProvider/GyroOffsetProvider.cpp
+  IMU ................... Src/Modules/Sensing/InertialDataProvider/
+  Predicción ángulos .... Src/Modules/Sensing/JointAnglePredictor/
+  Energía/calor ......... Src/Modules/MotionControl/EnergySaving/,
+                          Src/Modules/Infrastructure/RobotHealthProvider/
+  Simulador ............. Src/Libs/SimulatedNao/SimulatedRobot3D.cpp,
+                          Config/Scenes/Includes/NaoV6H25.rsi2
+  ONNX .................. Src/Libs/RL/PPOPolicyModel.cpp,
+                          Util/CompiledNN2ONNX/include/CompiledNN2ONNX/CompiledNN.h,
+                          Util/onnxruntime/ (1.10.0)
+  Integración RL actual . docs/RL/Integration.md, Src/Libs/RL/,
+                          Src/Libs/Python/Controller/RLSharedState.h
+  Configuración ......... Config/Robots/Default/{jointLimits, stiffnessSettings,
+                          jointCalibration, robotDimensions, massCalibration,
+                          walkingEngine, walkingEngineCommon, staticJointPoses,
+                          energySavingProvider, groundContactDetector,
+                          fsrDataProvider, inertialDataProvider}.cfg
+                          Config/Robots/juan/Body/imuCalibration.cfg
+
+===============================================================================
+FIN
+===============================================================================

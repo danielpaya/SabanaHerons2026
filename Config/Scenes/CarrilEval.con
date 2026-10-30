@@ -1,4 +1,4 @@
-# Escena TEMPORAL generada por Util/CarrilTools/evaluar_carril.py (salida y=-100 giro=-25, lineas_gastadas).
+# Escena TEMPORAL generada por Util/CarrilTools/evaluar_carril.py (salida y=-100 giro=-25, base).
 call Includes/Normal
 dr debugDrawing3d:representation:GameState off
 call Includes/Views
@@ -246,6 +246,7 @@ for Lower get representation:FrameInfo
 for Lower get representation:FrameInfo
 for Lower get representation:FrameInfo
 gc playing
+dr module:CarrilBehavior:arrancar
 for Lower get representation:FrameInfo
 for Lower get representation:FrameInfo
 for Lower get representation:FrameInfo

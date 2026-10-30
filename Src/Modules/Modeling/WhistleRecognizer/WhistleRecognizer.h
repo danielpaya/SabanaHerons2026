@@ -105,6 +105,8 @@ MODULE(WhistleRecognizer,
     (bool)(true) logWhistleDetections,         /**< Print feature summaries on confirmed detections. */
     (bool)(false) logRejectedWhistleCandidates,/**< Print near-miss summaries for tuning. */
     (int)(1000) logIntervalMs,                 /**< Minimum spacing between repeated info logs. */
+
+    (bool)(false) detectInAnyState,            /**< Listen outside SET/PLAYING (Carril: no GameController, the race is armed in INITIAL). */
   }),
 });
 
@@ -229,6 +231,7 @@ class WhistleRecognizer : public WhistleRecognizerBase
                                 size_t channel,
                                 const DetectorProfile& profile) const;
   unsigned lastLogTime = 0;
+  unsigned lastDetectionLogTime = 0;
 
 public:
   WhistleRecognizer();

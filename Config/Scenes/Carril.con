@@ -14,9 +14,12 @@ ar off
 mv -2200 0 320 0 0 0
 
 # Dejar que el robot se asiente en pie (~8 s: cada get espera un frame de la cámara
-# inferior) y empezar la carrera, como el segundo toque al pecho en el robot real.
-# A mano: Shift+Ctrl+P = playing (correr), Shift+Ctrl+M = penalización manual (PARO),
-# Shift+Ctrl+U = quitar penalización (nueva carrera desde donde esté).
+# inferior), armarlo (playing: de pie y activo) y arrancar. playing NO arranca: en el robot
+# arranca un toque al botón frontal de la cabeza o el silbato; en simulación no hay ni
+# botones ni silbato, y "dr module:CarrilBehavior:arrancar" hace de botón de la cabeza.
+# A mano: Shift+Ctrl+M = penalización manual (PARO), Shift+Ctrl+U = quitar penalización
+# (vuelve a armar, no arranca); después, "dr module:CarrilBehavior:arrancar" en la consola
+# empieza una carrera nueva desde donde esté.
 for Lower get representation:FrameInfo
 for Lower get representation:FrameInfo
 for Lower get representation:FrameInfo
@@ -258,3 +261,4 @@ for Lower get representation:FrameInfo
 for Lower get representation:FrameInfo
 for Lower get representation:FrameInfo
 gc playing
+dr module:CarrilBehavior:arrancar

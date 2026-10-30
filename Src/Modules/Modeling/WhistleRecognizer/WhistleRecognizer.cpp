@@ -529,14 +529,16 @@ void WhistleRecognizer::update(Whistle& theWhistle)
   const bool inCalibration = theGameState.playerState == GameState::calibration;
   const bool soundIsPlayingNow = SystemCall::soundIsPlaying();
 
+  const bool listening = detectInAnyState || theGameState.isSet() || theGameState.isPlaying();
+
   SystemCall::mute(mute
-                   && (theGameState.isSet() || theGameState.isPlaying())
+                   && listening
                    && !theGameState.isPenalized()
                    && !inCalibration);
 
   soundWasPlaying |= soundIsPlayingNow;
 
-  const bool shouldDetectWhistles = (theGameState.isSet() || theGameState.isPlaying()) && !soundWasPlaying;
+  const bool shouldDetectWhistles = listening && !soundWasPlaying;
   const bool shouldRecord = !soundWasPlaying;
   if(!hasRecorded && shouldRecord)
   {
@@ -737,12 +739,15 @@ void WhistleRecognizer::update(Whistle& theWhistle)
           haveBestFeatures = true;
         }
 
+        // Detections have their own rate limit: sharing lastLogTime with the 1 Hz
+        // monitor output suppressed almost every detection line.
         if(opened && logWhistleDetections &&
-           (lastLogTime == 0 || theFrameInfo.getTimeSince(lastLogTime) >= logIntervalMs))
+           (lastDetectionLogTime == 0 || theFrameInfo.getTimeSince(lastDetectionLogTime) >= minAnnotationDelay / 4))
         {
           OUTPUT_WARNING("Whistle detected: " << formatGateSummary(feat, gates, i, profile)
                          << " corr=" << correlation);
           lastLogTime = theFrameInfo.time;
+          lastDetectionLogTime = theFrameInfo.time;
           loggedDetection = true;
         }
 
