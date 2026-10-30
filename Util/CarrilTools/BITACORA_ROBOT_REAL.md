@@ -182,11 +182,11 @@ Desglose de la corrida a 0.8 (21:43:26), según las líneas `estado`:
 
 ### Pendiente
 
-- Resultado a 0.8 (si falla, probar 0.75).
+- Registrar las corridas posteriores a 0.8: se probó varias veces más, pero sus datos no
+  están en esta tabla (hay que sacarlos de los logs del robot).
 - Por qué pierde las líneas ~1/3 del tiempo a mitad de carrera (visión).
 - Prueba sin arnés y prueba de falsos positivos del silbato con ruido de sala (protocolo,
   paso 4.1).
-- Actualizar la tabla "Qué está probado" de `PROTOCOLO_ROBOT_REAL.md`.
 
 ## 2026-10-29 — offset del giroscopio al arrancar
 

@@ -9,10 +9,11 @@ para que un NAO V6 corra la **Carrera Individual de la Copa NAO CCM MX 2026**
 líneas negras de 1.9 cm, con franja de salida negra y meta roja. Si el robot pisa
 fuera del carril, la carrera se anula.
 
-**Estado:** visión y marcha validadas en simulación y en el robot real a
-`velocidadAvance = 0.3` (con el arranque anterior, por el pecho). El arranque por
-botón de la cabeza o silbato y la recuperación tras caída (paso 8) están validados
-solo en simulación; faltan en el robot real (protocolo en
+**Estado:** probado varias veces en el robot real a `velocidadAvance = 0.8` (resultados y
+decisiones en
+[Util/CarrilTools/BITACORA_ROBOT_REAL.md](Util/CarrilTools/BITACORA_ROBOT_REAL.md)).
+Faltan en el robot real el arranque por botón de la cabeza, la prueba sin arnés y la
+recuperación tras caída (protocolo en
 [Util/CarrilTools/PROTOCOLO_ROBOT_REAL.md](Util/CarrilTools/PROTOCOLO_ROBOT_REAL.md)).
 
 ## Resumen de resultados (simulación)
@@ -24,7 +25,7 @@ solo en simulación; faltan en el robot real (protocolo en
 | Velocidades probadas | 0.5 → 36 s, 0.8 → 24 s, 1.0 → 21.5 s; todas sin salidas |
 | Batería de robustez (salidas desplazadas/giradas × luz baja/alta, duela clara/oscura, líneas gastadas) | Todas las carreras correctas tras el umbral relativo: sin caídas, 0 salidas, margen mínimo ≥ 150 mm, parada entre x = 2577 y 2630 mm |
 | Paro manual y paro por inclinación | Verificados en simulación |
-| Arranque por botón de la cabeza / silbato, recuperación tras caída (paso 8) | Lógica verificada en simulación con disparos de prueba; regresión 12/12 a `velocidadAvance = 0.3` (~53 s, 0 salidas). Sin probar en el robot real |
+| Arranque por botón de la cabeza / silbato, recuperación tras caída (paso 8) | Lógica verificada en simulación con disparos de prueba; regresión 12/12 a `velocidadAvance = 0.3` (~53 s, 0 salidas). En el robot real solo se ha probado el silbato |
 | Compilación cruzada NAO (`Make/Linux/compile Develop Nao`) | Correcta; regresión en simulación 6/6 tras los cambios de seguridad |
 
 ## Cómo se hizo
@@ -34,15 +35,15 @@ real del simulador (no a ojo) antes de pasar al siguiente.
 
 ### Paso 0. Entorno de compilación (Ubuntu 24.04 / WSL2)
 
-El código base no compilaba con clang 18 y Qt ≥ 6.4. Cambios:
+El código base no compilaba con clang 18 y Qt ≥ 6.4. **Estos arreglos se hicieron solo
+en local y no están en el repositorio:** en un clon limpio con esas versiones hay que
+volver a aplicarlos.
 
-- `Make/CMake/CMakeLists.txt`: inclusión forzada de `<cstdint>` en todo el C++
-  (los submódulos CompiledNN y SimRobot usan `uintptr_t`/`uint16_t` sin incluirlo),
-  sin modificar los submódulos.
-- `Make/CMake/QtBackingStoreCompat.cpp` (nuevo): definición vacía de
-  `qt_registerDefaultPlatformBackingStoreOpenGLSupport()`, que Qt 6.4 eliminó y
-  SimRobot sigue llamando; se añade al target SimRobot solo con Qt ≥ 6.4.
-- Local, no versionable: `git config core.symlinks true` y re-checkout de los
+- Inclusión forzada de `<cstdint>` en todo el C++ (los submódulos CompiledNN y SimRobot
+  usan `uintptr_t`/`uint16_t` sin incluirlo), sin modificar los submódulos.
+- Definición vacía de `qt_registerDefaultPlatformBackingStoreOpenGLSupport()`, que Qt 6.4
+  eliminó y SimRobot sigue llamando, enlazada al target SimRobot.
+- Además: `git config core.symlinks true` y re-checkout de los
   symlinks; dependencias apt de `Util/SimRobot/README.md` más `build-essential`,
   `ccache` y `libasound2-dev`.
 
@@ -127,9 +128,10 @@ recolocarlo con `mv` y una espera inicial.
 ### Paso 5. Meta roja y parada
 
 El percepto añade `metaVisible`, `distanciaMeta` y `numPuntosMeta` (píxeles con
-V − 128 ≥ `minVRojoMeta`). El comportamiento frena a menos de `distanciaFrenado`
-(800 mm) y, a menos de `distanciaFijarParada` (500 mm), fija la parada por
-odometría a la distancia medida más `margenParada` (200 mm); después se queda de pie.
+V − 128 ≥ `minVRojoMeta`). El comportamiento frena a menos de `distanciaFrenado` y, a
+menos de `distanciaFijarParada`, fija la parada por odometría a la distancia medida más
+`margenParada` (200 mm); después se queda de pie. En simulación esas distancias eran 800
+y 500 mm; en el robot real se subieron (ver el paso 9).
 
 Resultado: 4.78 m recorridos, parada en x ≈ 2630 mm (la franja de meta ocupa
 2400..2500), 0 salidas, margen mínimo 238 mm. La meta se detecta desde ~2.5 m con
@@ -147,7 +149,7 @@ y resume en una tabla con veredicto (sin caída, 0 salidas, parada entre 2500 y
   oscura y líneas gastadas (gris, en tramos de 40 cm con huecos de 5 cm).
 
 Todo pasó salvo las líneas gastadas: su luminancia (~70) superaba el umbral
-absoluto `maxYLinea` = 60 y el robot no arrancaba. Se cambió a un **umbral
+absoluto de entonces (60) y el robot no arrancaba. Se cambió a un **umbral
 relativo**: un píxel es línea si su luminancia es menor que
 `min(maxYLinea = 110, fraccionYLinea = 0.6 × mediana de la fila)`. Con ello la
 batería completa pasó 12/12, incluidas las líneas gastadas.
@@ -178,7 +180,7 @@ carrera** y `CarrilBehavior` ya no depende de que el `GameState` pase a `playing
 | **Paro manual** (`penalizedManual`) | rojo | de pie, quieto | 1 toque al pecho |
 
 - Silbato nuevo: detectado más de `margenSilbato` (500 ms) después de armar y con
-  confianza ≥ `minConfianzaSilbato` (0.5). Con GameController activo, solo en `playing`.
+  confianza ≥ `minConfianzaSilbato` (0.35). Con GameController activo, solo en `playing`.
 - El botón frontal (`hitStreak == 1`) se ignora con el central o el trasero pulsados
   (gesto de sin rigidez).
 - **Tras cualquier paro** (pecho, inclinación, meta, sin líneas tras una caída) la
@@ -225,6 +227,21 @@ pueden simular el botón real de la cabeza, el reconocedor de silbato con audio,
 una caída real; el paso de "paro por inclinación" a "caída" tampoco se dio en
 simulación (con 30° el robot cae directamente).
 
+### Paso 9. Ajustes en el robot real
+
+Las pruebas en el NAO cambiaron varias cosas respecto a la simulación (detalle en
+[la bitácora](Util/CarrilTools/BITACORA_ROBOT_REAL.md)):
+
+- **Meta:** desde ~1.2 m la franja roja tapa las líneas, así que la parada se fija antes
+  (`distanciaFijarParada`) y se vuelve a fijar con cada lectura de la meta.
+- **Sin líneas:** `d` y `psi` se estiman por odometría desde el último percepto válido y
+  se aplica el mismo control, en lugar de seguir recto a ciegas.
+- **Silbato:** en este escenario se escucha en cualquier estado (`detectInAnyState`) y se
+  desactiva el perfil de silbido con la boca, que reaccionaba a las voces.
+- **Velocidad:** se subió por escalones hasta 0.8, ya probada varias veces. En la corrida
+  medida en la bitácora el robot real anduvo a ~120 mm/s, no a los 200 mm/s nominales de
+  la simulación, y tardó ~40 s.
+
 ## Uso
 
 ```bash
@@ -253,20 +270,24 @@ Para cambiar solo parámetros basta con editar el `.cfg` y desplegar con `-nc`.
 | `Src/Modules/Perception/Carril/CarrilPerceptProvider.*` | Detector de líneas y meta (cámara inferior) |
 | `Src/Modules/BehaviorControl/CarrilBehavior/*` | Control de marcha, parada en meta y paros |
 | `Src/Modules/Infrastructure/CarrilEvaluador/*`, `Src/Representations/Infrastructure/CarrilEvaluacion.h` | Registro CSV percepto vs. pose real (solo simulación) |
-| `Config/Scenarios/Carril/` | `threads.cfg` y parámetros (`carrilBehavior.cfg`, `carrilPerceptProvider.cfg`, `carrilEvaluador.cfg`) |
+| `Config/Scenarios/Carril/` | `threads.cfg` y parámetros (`carrilBehavior.cfg`, `carrilPerceptProvider.cfg`, `carrilEvaluador.cfg`, `audioProvider.cfg`, `whistleRecognizer.cfg`) |
 | `Config/Scenes/Carril.*`, `Config/Scenes/Includes/Carril/carril.rsi2` | Escena del carril |
+| `Config/Scenes/CarrilRemote.*` | Conexión con el robot real para ver sus cámaras |
 | `Config/Scenes/CarrilEval.*`, `Includes/Carril/carrilEval.rsi2` | Escenas generadas por `evaluar_carril.py` |
 | `Util/CarrilTools/evaluar_carril.py` | Generación de escenas, análisis y batería de robustez |
 | `Util/CarrilTools/PROTOCOLO_ROBOT_REAL.md` | Protocolo de pruebas en el NAO real |
-| `Make/CMake/CMakeLists.txt`, `Make/CMake/QtBackingStoreCompat.cpp` | Arreglos de compilación (clang 18 / Qt ≥ 6.4) |
+| `Util/CarrilTools/BITACORA_ROBOT_REAL.md` | Resultados, cambios y decisiones de cada sesión en el robot |
+| `Src/Modules/Modeling/WhistleRecognizer/*` | `detectInAnyState` y registro de cada detección del silbato |
+| `docs/RL/DESPLIEGUE_POLITICAS_MOVIMIENTO_NAO.txt` | Referencia para desplegar políticas de movimiento propias en el NAO |
 
 ## Pendiente
 
-- Pruebas en el robot real del arranque nuevo y de la caída siguiendo el protocolo
-  (etapas 1, 2, 4 y 5): botón de la cabeza, silbato real (falsos positivos con ruido de
-  sala) y caída/recuperación sobre colchoneta; después subir la velocidad desde 0.3.
-- Foto real de la cámara inferior sobre el carril (o cinta negra sobre madera) para
-  ajustar `fraccionYLinea` y `minVRojoMeta`.
+- Pruebas en el robot real siguiendo el protocolo: botón de la cabeza, paro por
+  inclinación, falsos positivos del silbato con ruido de sala, caída/recuperación sobre
+  colchoneta y carrera sin arnés.
+- Investigar por qué pierde las líneas ~1/3 del tiempo a mitad de carrera, con imágenes
+  de la cámara inferior sobre el carril (`fraccionYLinea`, `minVRojoMeta`).
+- Versionar los arreglos de compilación del paso 0.
 - Confirmar la regla de meta (si basta cruzarla o hay que parar dentro); hoy se
   para unos 10–15 cm después de la franja roja.
 

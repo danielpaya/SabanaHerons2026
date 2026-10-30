@@ -17,6 +17,7 @@ Los parámetros están en `Config/Scenarios/Carril/`:
 - `carrilBehavior.cfg`: arranque (botón, silbato), velocidad, ganancias, parada en meta,
   paros y recuperación tras caída.
 - `carrilPerceptProvider.cfg`: umbrales de color (línea negra y meta roja).
+- `whistleRecognizer.cfg` y `audioProvider.cfg`: silbato y ganancia del micrófono.
 
 Cambiar un `.cfg` y volver a desplegar con `-nc` (sin compilar) es suficiente.
 
@@ -46,7 +47,7 @@ o, si `arranquePorSilbato = true`, el silbato del juez.
     sin rigidez es empezar de cero: el silbato vuelve a valer.
 - Cada arranque es una carrera **nueva**: se olvidan la meta vista, los paros y las caídas.
 - Silbato: solo cuenta uno detectado más de `margenSilbato` (0.5 s) después de armar y con
-  confianza ≥ `minConfianzaSilbato` (0.5). Con GameController en la red, además solo en
+  confianza ≥ `minConfianzaSilbato` (0.35). Con GameController en la red, además solo en
   PLAYING (en la Copa no hay GameController ni Wi-Fi).
 - El botón frontal se ignora si se pulsa con el central o el trasero (gesto de sin rigidez)
   y si se mantiene más de 1 s. El arranque se reconoce ~0.2 s **después de soltarlo**.
@@ -145,10 +146,10 @@ para tocar el pecho.
 
 | Qué | Simulación | Robot real |
 |---|---|---|
-| Visión y marcha, parada en meta | sí (regresión 12/12 a 0.3 con el flujo nuevo) | sí, a 0.3 (flujo anterior: arranque con el pecho) |
+| Visión y marcha, parada en meta | sí (regresión 12/12 a 0.3 con el flujo nuevo) | sí, varias veces a 0.8 |
 | Arranque por botón de la cabeza | lógica sí, con el disparo `dr module:CarrilBehavior:arrancar`; el botón real no se simula | no |
-| Arranque por silbato | lógica sí (nuevo, viejo, tras un paro, desactivado), con el disparo `dr module:CarrilBehavior:silbato`; el reconocedor de audio no se simula | no |
-| Paro manual con el pecho y detención | sí | no con el flujo nuevo |
+| Arranque por silbato | lógica sí (nuevo, viejo, tras un paro, desactivado), con el disparo `dr module:CarrilBehavior:silbato`; el reconocedor de audio no se simula | sí; falta la prueba de falsos positivos con ruido de sala |
+| Paro manual con el pecho y detención | sí | sí (corrida de las 21:22:38 del 28-10) |
 | Paro por inclinación | sí (versión anterior); paso de inclinación a caída no | no |
 | Recuperación tras caída (levantarse, reanudar, sin líneas, 3 caídas) | sí, con caídas provocadas con `mv` | no |
 
